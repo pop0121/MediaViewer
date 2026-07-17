@@ -1,0 +1,46 @@
+import CoreData
+import CoreLocation
+import Foundation
+
+@objc(MediaItemEntity)
+final class MediaItemEntity: NSManagedObject {
+    @NSManaged var relativePath: String
+    @NSManaged var fileName: String
+    @NSManaged var fileSize: Int64
+    @NSManaged var contentModificationDate: Date
+    @NSManaged var creationDate: Date?
+    @NSManaged var latitude: Double
+    @NSManaged var longitude: Double
+    @NSManaged var locationName: String?
+    @NSManaged var mediaTypeRaw: String
+    @NSManaged var thumbnailPath: String?
+
+    var mediaType: MediaItem.MediaType {
+        get { MediaItem.MediaType(rawValue: mediaTypeRaw) ?? .photo }
+        set { mediaTypeRaw = newValue.rawValue }
+    }
+
+    var coordinate: CLLocationCoordinate2D? {
+        get {
+            // Use an impossible sentinel to mean "no coordinate".
+            if latitude == 0 && longitude == 0 { return nil }
+            return CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+        }
+        set {
+            if let newValue {
+                latitude = newValue.latitude
+                longitude = newValue.longitude
+            } else {
+                latitude = 0
+                longitude = 0
+            }
+        }
+    }
+}
+
+@objc(LocationNameEntity)
+final class LocationNameEntity: NSManagedObject {
+    @NSManaged var latitude: Double
+    @NSManaged var longitude: Double
+    @NSManaged var name: String
+}

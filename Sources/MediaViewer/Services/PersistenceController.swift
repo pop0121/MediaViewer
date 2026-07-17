@@ -1,0 +1,145 @@
+import CoreData
+import Foundation
+
+final class PersistenceController {
+    static let modelName = "MediaViewer"
+
+    let container: NSPersistentContainer
+
+    init(storeURL: URL) throws {
+        container = NSPersistentContainer(name: PersistenceController.modelName,
+                                          managedObjectModel: PersistenceController.makeModel())
+        let description = NSPersistentStoreDescription(url: storeURL)
+        description.type = NSSQLiteStoreType
+        description.shouldMigrateStoreAutomatically = true
+        description.shouldInferMappingModelAutomatically = true
+        container.persistentStoreDescriptions = [description]
+
+        var loadError: Error?
+        container.loadPersistentStores { _, error in
+            loadError = error
+        }
+        if let loadError {
+            throw loadError
+        }
+
+        container.viewContext.automaticallyMergesChangesFromParent = true
+        container.viewContext.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
+    }
+
+    /// Build the Core Data model in code so we do not depend on a bundled .xcdatamodeld.
+    private static func makeModel() -> NSManagedObjectModel {
+        let model = NSManagedObjectModel()
+
+        // MediaItemEntity
+        let itemEntity = NSEntityDescription()
+        itemEntity.name = "MediaItemEntity"
+        itemEntity.managedObjectClassName = "MediaItemEntity"
+
+        let relativePath = NSAttributeDescription()
+        relativePath.name = "relativePath"
+        relativePath.attributeType = .stringAttributeType
+        relativePath.isOptional = false
+
+        let fileName = NSAttributeDescription()
+        fileName.name = "fileName"
+        fileName.attributeType = .stringAttributeType
+        fileName.isOptional = false
+
+        let fileSize = NSAttributeDescription()
+        fileSize.name = "fileSize"
+        fileSize.attributeType = .integer64AttributeType
+        fileSize.isOptional = false
+
+        let contentModificationDate = NSAttributeDescription()
+        contentModificationDate.name = "contentModificationDate"
+        contentModificationDate.attributeType = .dateAttributeType
+        contentModificationDate.isOptional = false
+
+        let creationDate = NSAttributeDescription()
+        creationDate.name = "creationDate"
+        creationDate.attributeType = .dateAttributeType
+        creationDate.isOptional = true
+
+        let latitude = NSAttributeDescription()
+        latitude.name = "latitude"
+        latitude.attributeType = .doubleAttributeType
+        latitude.isOptional = false
+        latitude.defaultValue = 0.0
+
+        let longitude = NSAttributeDescription()
+        longitude.name = "longitude"
+        longitude.attributeType = .doubleAttributeType
+        longitude.isOptional = false
+        longitude.defaultValue = 0.0
+
+        let locationName = NSAttributeDescription()
+        locationName.name = "locationName"
+        locationName.attributeType = .stringAttributeType
+        locationName.isOptional = true
+
+        let mediaTypeRaw = NSAttributeDescription()
+        mediaTypeRaw.name = "mediaTypeRaw"
+        mediaTypeRaw.attributeType = .stringAttributeType
+        mediaTypeRaw.isOptional = false
+
+        let thumbnailPath = NSAttributeDescription()
+        thumbnailPath.name = "thumbnailPath"
+        thumbnailPath.attributeType = .stringAttributeType
+        thumbnailPath.isOptional = true
+
+        itemEntity.properties = [
+            relativePath, fileName, fileSize, contentModificationDate,
+            creationDate, latitude, longitude, locationName,
+            mediaTypeRaw, thumbnailPath
+        ]
+        itemEntity.uniquenessConstraints = [[relativePath]]
+
+        // LocationNameEntity
+        let locationEntity = NSEntityDescription()
+        locationEntity.name = "LocationNameEntity"
+        locationEntity.managedObjectClassName = "LocationNameEntity"
+
+        let locLat = NSAttributeDescription()
+        locLat.name = "latitude"
+        locLat.attributeType = .doubleAttributeType
+        locLat.isOptional = false
+
+        let locLon = NSAttributeDescription()
+        locLon.name = "longitude"
+        locLon.attributeType = .doubleAttributeType
+        locLon.isOptional = false
+
+        let locName = NSAttributeDescription()
+        locName.name = "name"
+        locName.attributeType = .stringAttributeType
+        locName.isOptional = false
+
+        locationEntity.properties = [locLat, locLon, locName]
+        locationEntity.uniquenessConstraints = [["latitude", "longitude"]]
+
+        model.entities = [itemEntity, locationEntity]
+        return model
+    }
+
+    /// Prepare the hidden `.mediaviewer` directory and return the SQLite URL.
+    static func storeURL(for rootURL: URL) -> URL {
+        let storeDir = rootURL
+            .appendingPathComponent(".mediaviewer", isDirectory: true)
+            .appendingPathComponent("Store", isDirectory: true)
+        try? FileManager.default.createDirectory(at: storeDir,
+                                                  withIntermediateDirectories: true,
+                                                  attributes: nil)
+        return storeDir.appendingPathComponent("MediaViewer.sqlite")
+    }
+
+    static func thumbnailsDirectory(for rootURL: URL) -> URL {
+        let thumbsDir = rootURL
+            .appendingPathComponent(".mediaviewer", isDirectory: true)
+            .appendingPathComponent("Thumbnails", isDirectory: true)
+        try? FileManager.default.createDirectory(at: thumbsDir,
+                                                  withIntermediateDirectories: true,
+                                                  attributes: nil)
+        return thumbsDir
+    }
+}
