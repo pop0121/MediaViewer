@@ -6,7 +6,10 @@ import SwiftUI
 /// third-party service is used beyond Apple's MapKit.
 struct PlacesMapView: NSViewRepresentable {
     let items: [MediaItem]
+    let rootURL: URL
+    let initialRegion: MKCoordinateRegion?
     let onOpen: (MediaItem) -> Void
+    let onOpenCluster: (PhotoCluster) -> Void
     let onRegionChange: (MKCoordinateRegion) -> Void
 
     func makeCoordinator() -> Coordinator {
@@ -57,7 +60,10 @@ struct PlacesMapView: NSViewRepresentable {
 
             guard let mapView else { return }
             if resetRegion || (!hasUserInteracted && items.count != previousCount) {
-                let region = Self.initialRegion(for: items)
+                let region = parent.initialRegion ?? Self.initialRegion(for: items)
+                if parent.initialRegion != nil {
+                    hasUserInteracted = true
+                }
                 suppressRegionUntil = CFAbsoluteTimeGetCurrent() + 0.3
                 mapView.setRegion(region, animated: false)
                 refreshClusters(region: region)
@@ -103,7 +109,7 @@ struct PlacesMapView: NSViewRepresentable {
                 for: clusterAnnotation
             ) as! PhotoClusterAnnotationView
             view.annotation = clusterAnnotation
-            view.configure(with: clusterAnnotation.cluster)
+            view.configure(with: clusterAnnotation.cluster, rootURL: parent.rootURL)
             return view
         }
 
@@ -116,9 +122,7 @@ struct PlacesMapView: NSViewRepresentable {
                 return
             }
 
-            if let region = PlacesClusterer.fittingRegion(for: cluster.items) {
-                mapView.setRegion(region, animated: true)
-            }
+            parent.onOpenCluster(cluster)
             mapView.deselectAnnotation(annotation, animated: false)
         }
 
@@ -179,29 +183,127 @@ final class PhotoClusterAnnotation: NSObject, MKAnnotation {
     }
 }
 
-final class PhotoClusterAnnotationView: MKMarkerAnnotationView {
+final class PhotoClusterAnnotationView: MKAnnotationView {
     static let reuseIdentifier = "PhotoClusterAnnotation"
+
+    private let imageViews: [NSImageView] = (0..<3).map { _ in
+        let view = NSImageView()
+        view.imageScaling = .scaleProportionallyUpOrDown
+        view.wantsLayer = true
+        view.layer?.cornerRadius = 4
+        view.layer?.masksToBounds = true
+        view.layer?.borderWidth = 1
+        view.layer?.borderColor = NSColor.white.withAlphaComponent(0.9).cgColor
+        return view
+    }
+    private let badgeLabel = NSTextField(labelWithString: "")
+    private var imageTasks: [Task<Void, Never>] = []
+    private var clusterID: String?
+
+    /// Test/debug visibility: how many card slots this annotation shows.
+    private(set) var displayedCardCount = 0
+    /// Test/debug visibility: "500" for multi-photo clusters, nil for one.
+    private(set) var badgeText: String?
+    /// Test/debug visibility: how many card images finished loading.
+    var loadedCardCount: Int { imageViews.filter { $0.image != nil }.count }
 
     override init(annotation: MKAnnotation?, reuseIdentifier: String?) {
         super.init(annotation: annotation, reuseIdentifier: reuseIdentifier)
-        canShowCallout = true
+        frame = NSRect(x: 0, y: 0, width: 86, height: 74)
+        centerOffset = CGPoint(x: 0, y: 26)
+        canShowCallout = false
         displayPriority = .required
-        collisionMode = .circle
-        animatesWhenAdded = false
+        collisionMode = .rectangle
+        wantsLayer = true
+
+        for (index, imageView) in imageViews.enumerated() {
+            imageView.frame = NSRect(x: 4 + CGFloat(index) * 10,
+                                     y: 18 - CGFloat(index) * 8,
+                                     width: 34, height: 34)
+            imageView.isHidden = true
+            imageView.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
+            addSubview(imageView)
+        }
+
+        badgeLabel.font = .systemFont(ofSize: 10, weight: .semibold)
+        badgeLabel.textColor = .white
+        badgeLabel.alignment = .center
+        badgeLabel.frame = NSRect(x: 54, y: 44, width: 26, height: 18)
+        badgeLabel.wantsLayer = true
+        badgeLabel.layer?.backgroundColor = NSColor.systemBlue.cgColor
+        badgeLabel.layer?.cornerRadius = 9
+        badgeLabel.layer?.masksToBounds = true
+        badgeLabel.isHidden = true
+        addSubview(badgeLabel)
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
     }
 
-    func configure(with cluster: PhotoCluster) {
-        markerTintColor = cluster.count > 1 ? .systemBlue : .systemTeal
-        if cluster.count > 1 {
-            glyphText = "\(cluster.count)"
-            glyphImage = nil
-        } else {
-            glyphText = nil
-            glyphImage = NSImage(systemSymbolName: "photo", accessibilityDescription: "Photo")
+    override func prepareForReuse() {
+        super.prepareForReuse()
+        cancelImageTasks()
+        clusterID = nil
+        displayedCardCount = 0
+        badgeText = nil
+        imageViews.forEach { $0.image = nil; $0.isHidden = true }
+        badgeLabel.isHidden = true
+    }
+
+    func configure(with cluster: PhotoCluster, rootURL: URL) {
+        guard clusterID != cluster.id else { return }
+        clusterID = cluster.id
+        cancelImageTasks()
+
+        let representatives = PlacesClusterer.representatives(from: cluster.items)
+        displayedCardCount = representatives.count
+        badgeText = cluster.count > 1 ? "\(cluster.count)" : nil
+        badgeLabel.stringValue = badgeText ?? ""
+        badgeLabel.isHidden = cluster.count <= 1
+        badgeLabel.frame = NSRect(x: cluster.count > 99 ? 50 : 54, y: 44,
+                                  width: cluster.count > 99 ? 32 : 26, height: 18)
+
+        for (index, imageView) in imageViews.enumerated() {
+            guard index < representatives.count else {
+                imageView.isHidden = true
+                imageView.image = nil
+                continue
+            }
+            imageView.isHidden = false
+            imageView.image = nil
+            let item = representatives[index]
+            let input = ThumbnailInput(
+                relativePath: item.relativePath,
+                modificationDate: item.contentModificationDate,
+                mediaType: item.mediaType
+            )
+            imageTasks.append(Task { [weak self, weak imageView] in
+                let image: NSImage? = await rootURL.withSecurityScope { () -> NSImage? in
+                    if let cached = ThumbnailGenerator.shared.cachedThumbnail(
+                        for: input, tier: .grid, rootURL: rootURL
+                    ) {
+                        return cached
+                    }
+                    // Generate only the 320px grid tier; never the fullscreen image.
+                    if let image = await ThumbnailGenerator.shared.thumbnail(
+                        for: input, tier: .grid, rootURL: rootURL
+                    ) {
+                        return image.image
+                    }
+                    return nil
+                }
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    guard let self, self.clusterID == cluster.id else { return }
+                    imageView?.image = image
+                }
+            })
         }
+    }
+
+    private func cancelImageTasks() {
+        imageTasks.forEach { $0.cancel() }
+        imageTasks.removeAll()
     }
 }

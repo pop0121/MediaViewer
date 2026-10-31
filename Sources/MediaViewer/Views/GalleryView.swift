@@ -44,7 +44,11 @@ struct GalleryView: View {
         VStack(spacing: 0) {
             toolbar(rootURL: rootURL)
 
-            if viewModel.hasTimeFocus && !viewModel.groupingMode.isMap {
+            if let clusterLabel = viewModel.clusterLabel {
+                ClusterBreadcrumbView(label: clusterLabel) {
+                    viewModel.backToMap()
+                }
+            } else if viewModel.hasTimeFocus && !viewModel.groupingMode.isMap {
                 TimeBreadcrumbView(viewModel: viewModel)
             }
 
@@ -182,16 +186,24 @@ struct GalleryView: View {
         ZStack(alignment: .topLeading) {
             PlacesMapView(
                 items: viewModel.items,
+                rootURL: rootURL,
+                initialRegion: viewModel.lastMapRegion,
                 onOpen: { item in
                     withAnimation(.easeOut(duration: 0.18)) {
                         viewModel.selectedItem = item
                     }
                 },
-                onRegionChange: { visibleRegion = $0 }
+                onOpenCluster: { cluster in
+                    viewModel.showClusterGrid(cluster: cluster)
+                },
+                onRegionChange: { region in
+                    viewModel.lastMapRegion = region
+                    visibleRegion = region
+                }
             )
 
             VStack(alignment: .leading, spacing: 8) {
-                if let region = visibleRegion {
+                if let region = visibleRegion, viewModel.clusterLabel == nil {
                     Button {
                         viewModel.showGrid(in: region)
                     } label: {

@@ -11,6 +11,9 @@ final class LibraryViewModel: ObservableObject {
     @Published var groupedItems: [MediaGroup] = []
     @Published var groupingMode: GroupingMode = .months
     @Published private(set) var timeFocus: TimeAnchor?
+    @Published private(set) var clusterSelection: Set<String>?
+    @Published private(set) var clusterLabel: String?
+    @Published var lastMapRegion: MKCoordinateRegion?
     @Published var regionFilter: GeoBounds?
     @Published var zoomLevel: Double = 1.0
     @Published var isScanning = false
@@ -72,16 +75,21 @@ final class LibraryViewModel: ObservableObject {
 
         $items
             .combineLatest($groupingMode, $regionFilter, $timeFocus)
-            .sink { [weak self] items, mode, regionFilter, _ in
+            .combineLatest($clusterSelection)
+            .sink { [weak self] combined, clusterSelection in
                 guard let self else { return }
+                let (items, mode, regionFilter, _) = combined
                 self.regroupCount += 1
-                let regional = regionFilter.map { bounds in
-                    items.filter { item in
+                var scoped = items
+                if let clusterSelection {
+                    scoped = scoped.filter { clusterSelection.contains($0.id) }
+                } else if let regionFilter {
+                    scoped = scoped.filter { item in
                         guard let coordinate = item.coordinate else { return false }
-                        return bounds.contains(coordinate)
+                        return regionFilter.contains(coordinate)
                     }
-                } ?? items
-                let filtered = self.applyTimeFocus(regional, mode: mode)
+                }
+                let filtered = self.applyTimeFocus(scoped, mode: mode)
                 self.groupedItems = self.group(
                     items: filtered,
                     mode: mode,
@@ -458,6 +466,10 @@ final class LibraryViewModel: ObservableObject {
 
     /// Change granularity while inheriting the current year/month focus.
     func selectGranularity(_ mode: GroupingMode) {
+        if clusterSelection != nil {
+            clusterSelection = nil
+            clusterLabel = nil
+        }
         guard mode != groupingMode else { return }
         let base = topAnchor ?? timeFocus
 
@@ -499,6 +511,8 @@ final class LibraryViewModel: ObservableObject {
     }
 
     func focus(on level: TimeBreadcrumbItem.Level) {
+        clusterSelection = nil
+        clusterLabel = nil
         switch level {
         case .all:
             showAllTimeline()
@@ -515,12 +529,38 @@ final class LibraryViewModel: ObservableObject {
     func showAllTimeline() {
         timeFocus = nil
         topAnchor = nil
+        clusterSelection = nil
+        clusterLabel = nil
         groupingMode = .all
+    }
+
+    /// Open the grid scoped to one map cluster. The set is a snapshot so the
+    /// grid stays stable while the user navigates.
+    func showClusterGrid(cluster: PhotoCluster) {
+        clusterSelection = Set(cluster.items.map(\.id))
+        clusterLabel = "\(cluster.count) photos"
+        regionFilter = nil
+        timeFocus = nil
+        topAnchor = nil
+        groupingMode = .months
+    }
+
+    /// Return to the map, preserving `lastMapRegion` and therefore the same
+    /// viewport/cluster layout the user came from.
+    func backToMap() {
+        clusterSelection = nil
+        clusterLabel = nil
+        regionFilter = nil
+        timeFocus = nil
+        topAnchor = nil
+        groupingMode = .location
     }
 
     /// Switch to a grid grouped by month, restricted to the map's current area.
     func showGrid(in region: MKCoordinateRegion) {
         guard let bounds = GeoBounds(region: region) else { return }
+        clusterSelection = nil
+        clusterLabel = nil
         timeFocus = nil
         topAnchor = nil
         groupingMode = .months

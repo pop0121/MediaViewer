@@ -125,6 +125,22 @@ enum PlacesClusterer {
         )
     }
 
+    /// First, middle and last photo by capture time (ties by id). Fewer than
+    /// three photos are returned as-is. These are the map card representatives.
+    static func representatives(from items: [MediaItem], limit: Int = 3) -> [MediaItem] {
+        let sorted = items.sorted { lhs, rhs in
+            let l = lhs.creationDate ?? .distantPast
+            let r = rhs.creationDate ?? .distantPast
+            return l == r ? lhs.id < rhs.id : l < r
+        }
+        guard sorted.count > limit else { return sorted }
+        let indices = [0, sorted.count / 2, sorted.count - 1]
+        var seen = Set<Int>()
+        return indices.compactMap { index in
+            seen.insert(index).inserted ? sorted[index] : nil
+        }
+    }
+
     /// Region that fits every coordinate, with a small margin. Used when
     /// tapping a multi-photo cluster.
     static func fittingRegion(for items: [MediaItem], minimumSpan: Double = 0.002) -> MKCoordinateRegion? {

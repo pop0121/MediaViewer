@@ -175,6 +175,24 @@ final class ThumbnailGenerator: @unchecked Sendable {
         }
     }
 
+    /// Read an already generated tier without touching the original image.
+    /// Map cards use this first so opening a map never decodes full photos.
+    func cachedThumbnail(
+        for input: ThumbnailInput,
+        tier: ThumbnailTier = .grid,
+        rootURL: URL
+    ) -> NSImage? {
+        guard let url = thumbnailURL(for: input, tier: tier, rootURL: rootURL) else { return nil }
+        let key = url.path as NSString
+        if let cached = cache(for: tier).object(forKey: key) {
+            return cached
+        }
+        guard FileManager.default.fileExists(atPath: url.path),
+              let image = loadDecodedThumbnail(at: url, tier: tier) else { return nil }
+        cache(for: tier).setObject(image, forKey: key, cost: image.cost)
+        return image
+    }
+
     // MARK: - Internal
 
     func thumbnailURL(for input: ThumbnailInput, tier: ThumbnailTier = .grid, rootURL: URL) -> URL? {
