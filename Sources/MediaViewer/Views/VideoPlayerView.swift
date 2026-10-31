@@ -10,6 +10,9 @@ struct VideoPlayerView: NSViewRepresentable {
         playerView.controlsStyle = .inline
         playerView.showsFullScreenToggleButton = false
         playerView.showsSharingServiceButton = false
+        // Show the whole frame at native aspect. The playback asset is the
+        // original file; no thumbnail-sized layer is involved.
+        playerView.videoGravity = .resizeAspect
 
         let player = AVPlayer(url: url)
         player.isMuted = true
