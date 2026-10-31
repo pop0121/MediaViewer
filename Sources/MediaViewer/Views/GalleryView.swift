@@ -77,6 +77,9 @@ struct GalleryView: View {
                                         .onTapGesture {
                                             viewModel.selectedItem = item
                                         }
+                                        .onAppear {
+                                            viewModel.prefetchThumbnails(around: item)
+                                        }
                                     }
                                 }
                             } header: {
@@ -149,6 +152,7 @@ struct GalleryView: View {
             .disabled(viewModel.isScanning)
 
             Button("Change Folder…") {
+                viewModel.cancelWork()
                 viewModel.rootURL = nil
                 viewModel.selectedItem = nil
                 viewModel.items = []

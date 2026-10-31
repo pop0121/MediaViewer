@@ -53,4 +53,26 @@ extension MediaItem {
         formatter.timeStyle = .short
         return formatter.string(from: creationDate)
     }
+
+    /// Copy with an updated reverse-geocoded location name.
+    func withLocationName(_ name: String) -> MediaItem {
+        MediaItem(
+            id: id,
+            relativePath: relativePath,
+            fileName: fileName,
+            fileSize: fileSize,
+            contentModificationDate: contentModificationDate,
+            creationDate: creationDate,
+            coordinate: coordinate,
+            locationName: name,
+            mediaType: mediaType,
+            thumbnailPath: thumbnailPath
+        )
+    }
+}
+
+/// Stable key for grouping items that share a coordinate.
+struct LocationKey: Hashable, Sendable {
+    let latitude: Double
+    let longitude: Double
 }

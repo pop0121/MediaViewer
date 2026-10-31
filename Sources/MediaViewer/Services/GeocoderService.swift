@@ -27,7 +27,10 @@ final class GeocoderService: NSObject {
     /// Find all indexed items that have coordinates but no cached location name and reverse-geocode them.
     /// If the network is unavailable or rate-limiting kicks in, abort early and mark remaining
     /// coordinates as "Unknown Location" so they are not retried on every refresh.
-    func geocodeUncachedCoordinates(in context: NSManagedObjectContext) async {
+    func geocodeUncachedCoordinates(
+        in context: NSManagedObjectContext,
+        onResolved: (@Sendable (GeocodedLocation) async -> Void)? = nil
+    ) async {
         let uncachedItems = await context.perform {
             let request = NSFetchRequest<MediaItemEntity>(entityName: "MediaItemEntity")
             request.predicate = NSPredicate(format: "latitude != 0 AND longitude != 0 AND locationName == nil")
@@ -74,6 +77,12 @@ final class GeocoderService: NSObject {
                     }
 
                     try? context.save()
+                }
+
+                if let onResolved {
+                    await onResolved(GeocodedLocation(latitude: coordinate.latitude,
+                                                      longitude: coordinate.longitude,
+                                                      name: name))
                 }
 
             case .failure(let error):
@@ -172,6 +181,13 @@ private enum GeocodeError: Error {
     case noResult
     case network
     case other
+}
+
+/// A resolved place for one coordinate, delivered to the UI as soon as it is known.
+struct GeocodedLocation: Sendable {
+    let latitude: Double
+    let longitude: Double
+    let name: String
 }
 
 private struct CoordinateKey: Hashable {

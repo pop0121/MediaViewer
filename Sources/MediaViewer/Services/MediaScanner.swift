@@ -135,20 +135,6 @@ final class MediaScanner {
             try self.context.save()
         }
 
-        // 5. Generate thumbnails for changed/new files outside the Core Data context.
-        let thumbnailInputs = extractedMetadata.map { (file, metadata) in
-            ThumbnailInput(
-                relativePath: file.relativePath,
-                modificationDate: file.modificationDate,
-                mediaType: metadata.mediaType
-            )
-        }
-        await ThumbnailGenerator.shared.generateThumbnails(
-            for: thumbnailInputs,
-            rootURL: rootURL,
-            maxConcurrent: Self.maxConcurrentExtractions
-        )
-
         return ScanResult(processed: processed, removed: discoveredRelativePaths.count + itemsByPath.count - processed)
     }
 

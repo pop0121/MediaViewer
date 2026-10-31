@@ -12,6 +12,7 @@ final class LibraryViewModel: ObservableObject {
     @Published var zoomLevel: Double = 1.0
     @Published var isScanning = false
     @Published var scanProgress: String = ""
+    @Published var scanFraction: Double?
     @Published var selectedItem: MediaItem?
     @Published var errorMessage: String?
     @Published var totalItemCount: Int = 0
@@ -21,6 +22,13 @@ final class LibraryViewModel: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     private let batchSize = 1000
     private var currentBatchOffset = 0
+
+    private var scanTask: Task<Void, Never>?
+    private var maintenanceTask: Task<Void, Never>?
+    private var prefetchTask: Task<Void, Never>?
+    private var prefetchAnchor: Int?
+    private var indexByID: [String: Int] = [:]
+    private var locationIndices: [LocationKey: [Int]] = [:]
 
     private let collapsedGroupDefaultsKey = "collapsedGroupIDsByMode"
     private var collapsedGroupIDsByMode: [String: Set<String>] = [:]
@@ -56,7 +64,7 @@ final class LibraryViewModel: ObservableObject {
         do {
             let url = try BookmarkStore.shared.loadRootURL()
             rootURL = url
-            Task { await setupLibrary(for: url) }
+            startScan(for: url)
         } catch {
             // No stored bookmark or stale bookmark; show selector.
             rootURL = nil
@@ -64,14 +72,41 @@ final class LibraryViewModel: ObservableObject {
     }
 
     func setRootURL(_ url: URL) {
+        cancelWork()
         rootURL = url
+        items = []
+        groupedItems = []
+        totalItemCount = 0
+        selectedItem = nil
+        scanProgress = ""
         try? BookmarkStore.shared.saveBookmark(for: url)
-        Task { await setupLibrary(for: url) }
+        startScan(for: url)
     }
 
     func refresh() async {
         guard let rootURL else { return }
-        await scan(rootURL: rootURL)
+        cancelWork()
+        let task = Task { await self.performScan(rootURL: rootURL) }
+        scanTask = task
+        await withTaskCancellationHandler {
+            await task.value
+        } onCancel: {
+            task.cancel()
+        }
+    }
+
+    func cancelWork() {
+        scanTask?.cancel()
+        maintenanceTask?.cancel()
+        prefetchTask?.cancel()
+        scanTask = nil
+        maintenanceTask = nil
+        prefetchTask = nil
+    }
+
+    private func startScan(for url: URL) {
+        scanTask?.cancel()
+        scanTask = Task { await self.setupLibrary(for: url) }
     }
 
     func loadMoreItems() async {
@@ -84,15 +119,18 @@ final class LibraryViewModel: ObservableObject {
         do {
             let storeURL = PersistenceController.storeURL(for: url)
             persistence = try PersistenceController(storeURL: storeURL)
-            await scan(rootURL: url)
+            await performScan(rootURL: url)
+        } catch is CancellationError {
+            scanProgress = "Cancelled"
         } catch {
             errorMessage = "Failed to open library: \(error.localizedDescription)"
         }
     }
 
-    private func scan(rootURL: URL) async {
+    private func performScan(rootURL: URL) async {
         isScanning = true
         scanProgress = "Scanning…"
+        scanFraction = nil
         defer { isScanning = false }
 
         guard let persistence else { return }
@@ -101,34 +139,92 @@ final class LibraryViewModel: ObservableObject {
             let result = try await rootURL.withSecurityScope {
                 let backgroundContext = persistence.container.newBackgroundContext()
                 let scanner = MediaScanner(context: backgroundContext)
-                let scanResult = try await scanner.scan(rootURL: rootURL)
-
-                // Geocode uncached coordinates in the background.
-                let geocoderContext = persistence.container.newBackgroundContext()
-                await GeocoderService.shared.geocodeUncachedCoordinates(in: geocoderContext)
-
-                // Clean up thumbnails for files that no longer exist.
-                let cleanupContext = persistence.container.newBackgroundContext()
-                let validInputs = await cleanupContext.perform {
-                    let request = NSFetchRequest<MediaItemEntity>(entityName: "MediaItemEntity")
-                    let items = (try? cleanupContext.fetch(request)) ?? []
-                    return items.map {
-                        ThumbnailInput(
-                            relativePath: $0.relativePath,
-                            modificationDate: $0.contentModificationDate,
-                            mediaType: $0.mediaType
-                        )
-                    }
-                }
-                await ThumbnailGenerator.shared.purgeOrphanedThumbnails(rootURL: rootURL, validInputs: validInputs)
-
-                return scanResult
+                return try await scanner.scan(rootURL: rootURL)
             }
 
+            // Publish the grid as soon as the index is ready. Thumbnails are
+            // generated on demand by the grid, and geocoding runs afterwards.
             await fetchItems()
-            scanProgress = "Processed \(result.processed) new/changed items, removed \(result.removed). Showing \(items.count) of \(totalItemCount)."
+            scanProgress = "Indexed \(result.processed) new/changed items, \(totalItemCount) total."
+            startMaintenance(rootURL: rootURL)
+        } catch is CancellationError {
+            scanProgress = "Cancelled"
         } catch {
             errorMessage = "Scan failed: \(error.localizedDescription)"
+        }
+    }
+
+    /// Post-scan work that must not delay the first screen: thumbnail cleanup
+    /// and reverse geocoding. Both update the UI incrementally as results arrive.
+    private func startMaintenance(rootURL: URL) {
+        maintenanceTask?.cancel()
+        maintenanceTask = Task { [weak self] in
+            guard let self else { return }
+            await self.purgeOrphanedThumbnails(rootURL: rootURL)
+            guard !Task.isCancelled else { return }
+            await self.geocodeLocations(rootURL: rootURL)
+        }
+    }
+
+    private func purgeOrphanedThumbnails(rootURL: URL) async {
+        guard let persistence else { return }
+        let context = persistence.container.newBackgroundContext()
+        let validInputs = await context.perform {
+            let request = NSFetchRequest<MediaItemEntity>(entityName: "MediaItemEntity")
+            let items = (try? context.fetch(request)) ?? []
+            return items.map {
+                ThumbnailInput(
+                    relativePath: $0.relativePath,
+                    modificationDate: $0.contentModificationDate,
+                    mediaType: $0.mediaType
+                )
+            }
+        }
+        guard !Task.isCancelled else { return }
+        await rootURL.withSecurityScope {
+            await ThumbnailGenerator.shared.purgeOrphanedThumbnails(rootURL: rootURL, validInputs: validInputs)
+        }
+    }
+
+    private func geocodeLocations(rootURL: URL) async {
+        guard let persistence else { return }
+        let context = persistence.container.newBackgroundContext()
+        await GeocoderService.shared.geocodeUncachedCoordinates(in: context) { [weak self] resolved in
+            await self?.applyLocationName(resolved)
+        }
+    }
+
+    private func applyLocationName(_ resolved: GeocodedLocation) {
+        let key = LocationKey(latitude: resolved.latitude, longitude: resolved.longitude)
+        guard let indices = locationIndices[key], !indices.isEmpty else { return }
+        for index in indices where items.indices.contains(index) {
+            items[index] = items[index].withLocationName(resolved.name)
+        }
+    }
+
+    /// Warm the thumbnail cache for items around the visible cell.
+    func prefetchThumbnails(around item: MediaItem) {
+        guard let rootURL, let index = indexByID[item.id] else { return }
+        if let anchor = prefetchAnchor, abs(anchor - index) < 8 { return }
+        prefetchAnchor = index
+
+        let lower = max(0, index - 4)
+        let upper = min(items.count, index + 24)
+        guard lower < upper else { return }
+        let inputs = items[lower..<upper].map {
+            ThumbnailInput(
+                relativePath: $0.relativePath,
+                modificationDate: $0.contentModificationDate,
+                mediaType: $0.mediaType
+            )
+        }
+
+        prefetchTask?.cancel()
+        prefetchTask = Task.detached(priority: .utility) {
+            for input in inputs {
+                if Task.isCancelled { return }
+                _ = await ThumbnailGenerator.shared.thumbnail(for: input, rootURL: rootURL)
+            }
         }
     }
 
@@ -136,6 +232,9 @@ final class LibraryViewModel: ObservableObject {
         guard let persistence else { return }
         currentBatchOffset = 0
         items = []
+        indexByID = [:]
+        locationIndices = [:]
+        prefetchAnchor = nil
 
         let context = persistence.container.viewContext
         let countRequest = NSFetchRequest<MediaItemEntity>(entityName: "MediaItemEntity")
@@ -181,8 +280,20 @@ final class LibraryViewModel: ObservableObject {
                 )
             }
             items.append(contentsOf: newItems)
+            indexAppendedItems(from: items.count - newItems.count, to: items.count)
         } catch {
             errorMessage = "Failed to load items: \(error.localizedDescription)"
+        }
+    }
+
+    private func indexAppendedItems(from lowerBound: Int, to upperBound: Int) {
+        guard lowerBound < upperBound else { return }
+        for index in lowerBound..<upperBound {
+            let item = items[index]
+            indexByID[item.id] = index
+            guard let coordinate = item.coordinate else { continue }
+            let key = LocationKey(latitude: coordinate.latitude, longitude: coordinate.longitude)
+            locationIndices[key, default: []].append(index)
         }
     }
 
