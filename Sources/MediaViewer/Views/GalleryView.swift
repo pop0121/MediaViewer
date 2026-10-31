@@ -14,7 +14,7 @@ struct GalleryView: View {
                                 viewModel: viewModel,
                                 rootURL: rootURL
                             )
-                            .transition(.opacity)
+                            .transition(.opacity.combined(with: .scale(scale: 0.98)))
                         }
                     }
             } else {
@@ -83,7 +83,8 @@ struct GalleryView: View {
                 ScrollView {
                     LazyVGrid(
                         columns: gridColumns,
-                        spacing: 8
+                        spacing: 8,
+                        pinnedViews: [.sectionHeaders]
                     ) {
                         ForEach(viewModel.groupedItems) { group in
                             Section {
@@ -95,7 +96,9 @@ struct GalleryView: View {
                                         )
                                         .contentShape(Rectangle())
                                         .onTapGesture {
-                                            viewModel.selectedItem = item
+                                            withAnimation(.easeOut(duration: 0.18)) {
+                                                viewModel.selectedItem = item
+                                            }
                                         }
                                         .onAppear {
                                             viewModel.prefetchThumbnails(around: item)

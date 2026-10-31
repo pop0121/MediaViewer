@@ -30,6 +30,7 @@ struct FullscreenViewerView: View {
 
             if let item = currentItem {
                 content(for: item)
+                    .id(item.id)
                     .scaleEffect(item.isPhoto ? scale : 1.0)
                     .offset(item.isPhoto ? offset : .zero)
                     .gesture(item.isPhoto ? magnificationGesture : nil)
@@ -195,7 +196,9 @@ struct FullscreenViewerView: View {
     }
 
     private func close() {
-        viewModel.selectedItem = nil
+        withAnimation(.easeOut(duration: 0.18)) {
+            viewModel.selectedItem = nil
+        }
     }
 
     private func resetZoom() {
@@ -214,27 +217,34 @@ struct FullscreenViewerView: View {
 
     private func installKeyMonitor() {
         eventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            // Leave system shortcuts (Cmd, Option, Ctrl) untouched so Hide, Minimize,
-            // Spotlight, Mission Control, and window-manager shortcuts keep working.
-            let consumedModifiers: NSEvent.ModifierFlags = [.command, .option, .control]
-            let hasConsumedModifier = !event.modifierFlags.intersection(consumedModifiers).isEmpty
-
-            switch event.keyCode {
-            case 53: // Escape
-                Task { @MainActor in self.close() }
-                return nil
-            case 49 where !hasConsumedModifier: // Space
-                Task { @MainActor in self.togglePlayPause() }
-                return nil
-            case 123 where !hasConsumedModifier, 126 where !hasConsumedModifier: // Left arrow, Up arrow
-                Task { @MainActor in self.previousItem() }
-                return nil
-            case 124 where !hasConsumedModifier, 125 where !hasConsumedModifier: // Right arrow, Down arrow
-                Task { @MainActor in self.nextItem() }
-                return nil
-            default:
-                return event
+            MainActor.assumeIsolated {
+                self.handleKeyDown(event)
             }
+        }
+    }
+
+    @MainActor
+    private func handleKeyDown(_ event: NSEvent) -> NSEvent? {
+        // Leave system shortcuts (Cmd, Option, Ctrl) untouched so Hide, Minimize,
+        // Spotlight, Mission Control, and window-manager shortcuts keep working.
+        let consumedModifiers: NSEvent.ModifierFlags = [.command, .option, .control]
+        let hasConsumedModifier = !event.modifierFlags.intersection(consumedModifiers).isEmpty
+
+        switch event.keyCode {
+        case 53: // Escape
+            close()
+            return nil
+        case 49 where !hasConsumedModifier: // Space
+            togglePlayPause()
+            return nil
+        case 123 where !hasConsumedModifier, 126 where !hasConsumedModifier: // Left arrow, Up arrow
+            previousItem()
+            return nil
+        case 124 where !hasConsumedModifier, 125 where !hasConsumedModifier: // Right arrow, Down arrow
+            nextItem()
+            return nil
+        default:
+            return event
         }
     }
 
@@ -291,10 +301,38 @@ struct FullscreenViewerView: View {
             return
         }
         let url = rootURL.appendingPathComponent(item.relativePath)
-        let image = rootURL.withSecurityScope {
-            NSImage(contentsOf: url)
-        }
-        fullImage = image
+        let root = rootURL
+        let image = await Task.detached(priority: .userInitiated) { () -> ThumbnailImage? in
+            root.withSecurityScope {
+                Self.decodeFullImage(at: url)
+            }
+        }.value
+        guard currentItem?.id == item.id else { return }
+        fullImage = image?.image
         isLoadingFullImage = false
+    }
+
+    /// Decode the full-resolution image off the main thread, honouring EXIF
+    /// orientation. The bitmap is created eagerly so drawing never decodes.
+    nonisolated private static func decodeFullImage(at url: URL) -> ThumbnailImage? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
+        let width = properties?[kCGImagePropertyPixelWidth] as? Int ?? 0
+        let height = properties?[kCGImagePropertyPixelHeight] as? Int ?? 0
+        let maxPixel = max(width, height)
+
+        var options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+        ]
+        if maxPixel > 0 {
+            options[kCGImageSourceThumbnailMaxPixelSize] = maxPixel
+        }
+        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
+            return nil
+        }
+        let image = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+        return ThumbnailImage(image: image)
     }
 }
