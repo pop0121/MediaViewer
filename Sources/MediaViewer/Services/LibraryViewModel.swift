@@ -10,6 +10,7 @@ final class LibraryViewModel: ObservableObject {
     @Published var items: [MediaItem] = []
     @Published var groupedItems: [MediaGroup] = []
     @Published var groupingMode: GroupingMode = .months
+    @Published private(set) var timeFocus: TimeAnchor?
     @Published var regionFilter: GeoBounds?
     @Published var zoomLevel: Double = 1.0
     @Published var isScanning = false
@@ -39,6 +40,9 @@ final class LibraryViewModel: ObservableObject {
     private var indexByID: [String: Int] = [:]
     private var locationIndices: [LocationKey: [Int]] = [:]
     private var dateKeyCache: [String: DateKeys] = [:]
+    /// Topmost section inferred from the grid's scroll position; consumed when
+    /// the user changes granularity.
+    private(set) var topAnchor: TimeAnchor?
 
     private let collapsedGroupDefaultsKey = "collapsedGroupIDsByMode"
     private var collapsedGroupIDsByMode: [String: Set<String>] = [:]
@@ -67,16 +71,17 @@ final class LibraryViewModel: ObservableObject {
             .store(in: &cancellables)
 
         $items
-            .combineLatest($groupingMode, $regionFilter)
-            .sink { [weak self] items, mode, regionFilter in
+            .combineLatest($groupingMode, $regionFilter, $timeFocus)
+            .sink { [weak self] items, mode, regionFilter, _ in
                 guard let self else { return }
                 self.regroupCount += 1
-                let filtered = regionFilter.map { bounds in
+                let regional = regionFilter.map { bounds in
                     items.filter { item in
                         guard let coordinate = item.coordinate else { return false }
                         return bounds.contains(coordinate)
                     }
                 } ?? items
+                let filtered = self.applyTimeFocus(regional, mode: mode)
                 self.groupedItems = self.group(
                     items: filtered,
                     mode: mode,
@@ -431,9 +436,93 @@ final class LibraryViewModel: ObservableObject {
 
     // MARK: - Grouping
 
+    // MARK: - Time drill-down
+
+    var hasTimeFocus: Bool { timeFocus != nil }
+
+    var breadcrumbItems: [TimeBreadcrumbItem] {
+        var items = [TimeBreadcrumbItem(level: .all, title: "All")]
+        guard let focus = timeFocus else { return items }
+        items.append(TimeBreadcrumbItem(level: .year(focus.year), title: String(focus.year)))
+        if let monthTitle = focus.monthTitle {
+            items.append(TimeBreadcrumbItem(level: .month(focus.year, focus.month!), title: monthTitle))
+        }
+        return items
+    }
+
+    /// Feed the topmost visible section from the grid's geometry observer.
+    /// This only records the anchor; it never regroups by itself.
+    func updateTopSection(_ groupID: String?) {
+        topAnchor = groupID.flatMap(TimeAnchor.init(groupID:))
+    }
+
+    /// Change granularity while inheriting the current year/month focus.
+    func selectGranularity(_ mode: GroupingMode) {
+        guard mode != groupingMode else { return }
+        let base = topAnchor ?? timeFocus
+
+        switch mode {
+        case .all:
+            timeFocus = nil
+        case .location:
+            timeFocus = nil
+        case .years:
+            timeFocus = base.map { TimeAnchor(year: $0.year) }
+        case .months:
+            if groupingMode == .days || groupingMode == .location {
+                timeFocus = base.flatMap { anchor in
+                    guard let month = anchor.month else { return TimeAnchor(year: anchor.year) }
+                    return TimeAnchor(year: anchor.year, month: month)
+                }
+            } else {
+                timeFocus = base.map { TimeAnchor(year: $0.year) }
+            }
+        case .days:
+            timeFocus = base.map { TimeAnchor(year: $0.year, month: $0.month) }
+        }
+
+        topAnchor = nil
+        groupingMode = mode
+    }
+
+    /// Pop one breadcrumb level: month -> year, year -> full timeline.
+    func goBackOneLevel() {
+        guard let focus = timeFocus else { return }
+        if focus.month != nil {
+            timeFocus = TimeAnchor(year: focus.year)
+            groupingMode = .months
+        } else {
+            timeFocus = nil
+            groupingMode = .all
+        }
+        topAnchor = nil
+    }
+
+    func focus(on level: TimeBreadcrumbItem.Level) {
+        switch level {
+        case .all:
+            showAllTimeline()
+        case .year(let year):
+            timeFocus = TimeAnchor(year: year)
+            groupingMode = .years
+        case .month(let year, let month):
+            timeFocus = TimeAnchor(year: year, month: month)
+            groupingMode = .months
+        }
+        topAnchor = nil
+    }
+
+    func showAllTimeline() {
+        timeFocus = nil
+        topAnchor = nil
+        groupingMode = .all
+    }
+
     /// Switch to a grid grouped by month, restricted to the map's current area.
     func showGrid(in region: MKCoordinateRegion) {
         guard let bounds = GeoBounds(region: region) else { return }
+        timeFocus = nil
+        topAnchor = nil
         groupingMode = .months
         regionFilter = bounds
     }
@@ -476,6 +565,19 @@ final class LibraryViewModel: ObservableObject {
         let encodable = collapsedGroupIDsByMode.mapValues { Array($0) }
         if let data = try? JSONEncoder().encode(encodable) {
             UserDefaults.standard.set(data, forKey: collapsedGroupDefaultsKey)
+        }
+    }
+
+    private func applyTimeFocus(_ items: [MediaItem], mode: GroupingMode) -> [MediaItem] {
+        guard let focus = timeFocus, mode != .all, mode != .location else { return items }
+        let calendar = Calendar.current
+        return items.filter { item in
+            guard let date = item.creationDate else { return false }
+            let components = calendar.dateComponents([.year, .month, .day], from: date)
+            guard components.year == focus.year else { return false }
+            if let month = focus.month, components.month != month { return false }
+            if let day = focus.day, components.day != day { return false }
+            return true
         }
     }
 

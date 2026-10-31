@@ -44,6 +44,10 @@ struct GalleryView: View {
         VStack(spacing: 0) {
             toolbar(rootURL: rootURL)
 
+            if viewModel.hasTimeFocus && !viewModel.groupingMode.isMap {
+                TimeBreadcrumbView(viewModel: viewModel)
+            }
+
             if viewModel.isScanning {
                 HStack(spacing: 8) {
                     if let fraction = viewModel.scanFraction {
@@ -147,6 +151,7 @@ struct GalleryView: View {
                         }
                         .buttonStyle(.plain)
                         .background(Color(nsColor: .controlBackgroundColor))
+                        .background(SectionFrameReader(id: group.id, coordinateSpace: "gridScroll"))
                     }
                 }
             }
@@ -156,6 +161,9 @@ struct GalleryView: View {
                     viewModel.setFastScrolling(fast)
                 }
             )
+            .onPreferenceChange(SectionFramePreferenceKey.self) { frames in
+                viewModel.updateTopSection(TimeFocusResolver.topSection(frames: frames))
+            }
 
             if viewModel.canLoadMore {
                 ProgressView()
@@ -166,6 +174,7 @@ struct GalleryView: View {
                     }
             }
         }
+        .coordinateSpace(name: "gridScroll")
     }
 
     @ViewBuilder
@@ -234,7 +243,10 @@ struct GalleryView: View {
     @ViewBuilder
     private func toolbar(rootURL: URL) -> some View {
         HStack(spacing: 16) {
-            GroupingPickerView(mode: $viewModel.groupingMode)
+            GroupingPickerView(mode: Binding(
+                get: { viewModel.groupingMode },
+                set: { viewModel.selectGranularity($0) }
+            ))
 
             HStack(spacing: 6) {
                 Image(systemName: "square.grid.3x3")
