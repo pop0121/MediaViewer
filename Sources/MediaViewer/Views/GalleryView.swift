@@ -147,6 +147,15 @@ struct GalleryView: View {
                     }
                 }
             }
+
+            if viewModel.groupingMode == .location {
+                Text("Location data © OpenStreetMap contributors (ODbL)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 4)
+            }
         }
     }
 

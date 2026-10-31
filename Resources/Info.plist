@@ -24,5 +24,11 @@
     <string></string>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
+    <!-- Optional: set MEDIAVIEWER_AMAP_KEY at runtime instead of editing this file. -->
+    <key>AmapAPIKey</key>
+    <string></string>
+    <!-- Required by Nominatim's usage policy; override with MEDIAVIEWER_NOMINATIM_CONTACT. -->
+    <key>NominatimContact</key>
+    <string></string>
 </dict>
 </plist>

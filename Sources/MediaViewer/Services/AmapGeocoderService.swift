@@ -1,26 +1,43 @@
 import CoreLocation
 import Foundation
 
-/// Optional Amap (Gaode) reverse-geocoding fallback for regions where CLGeocoder is unreliable.
-final class AmapGeocoderService {
-    static let shared = AmapGeocoderService()
+/// Amap (Gaode) reverse-geocoding backend, preferred inside China.
+final class AmapGeocoderService: ReverseGeocodingBackend, @unchecked Sendable {
+    static let shared = AmapGeocoderService(apiKey: configuredAPIKey)
 
-    /// Amap Web Service API key. In production, load this from a plist or environment variable
-    /// instead of committing it to source control.
-    private let apiKey: String
+    var backendName: String { "amap" }
+
+    /// The key is never committed: configure it via `MEDIAVIEWER_AMAP_KEY` or
+    /// the `AmapAPIKey` entry in the app's Info.plist.
+    static var configuredAPIKey: String? {
+        let env = ProcessInfo.processInfo.environment["MEDIAVIEWER_AMAP_KEY"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let env, !env.isEmpty { return env }
+        if let plist = Bundle.main.object(forInfoDictionaryKey: "AmapAPIKey") as? String {
+            let trimmed = plist.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty { return trimmed }
+        }
+        return nil
+    }
+
+    private let apiKey: String?
     private let session: URLSession
 
-    init(apiKey: String = "477e2b1d983a3b70dfe2b39855678a61") {
+    init(apiKey: String?) {
         self.apiKey = apiKey
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 10
         config.timeoutIntervalForResource = 30
         self.session = URLSession(configuration: config)
+        if apiKey == nil {
+            Log.geocode.notice("Amap API key not configured; falling back to Nominatim")
+        }
     }
 
     /// Reverse-geocode a WGS-84 coordinate using Amap.
-    /// - Returns: A human-readable place name, or `nil` on failure.
-    func reverseGeocode(coordinate: CLLocationCoordinate2D) async -> String? {
+    func reverseGeocode(coordinate: CLLocationCoordinate2D) async -> Result<String, GeocodeError> {
+        guard let apiKey, !apiKey.isEmpty else { return .failure(.other) }
+
         let gcj = CoordinateConverter.wgs84ToGcj02(coordinate)
         let location = String(format: "%.6f,%.6f", gcj.longitude, gcj.latitude)
         let endpoint = "https://restapi.amap.com/v3/geocode/regeo"
@@ -32,13 +49,13 @@ final class AmapGeocoderService {
             URLQueryItem(name: "output", value: "JSON")
         ]
 
-        guard let url = components.url else { return nil }
+        guard let url = components.url else { return .failure(.other) }
 
         do {
             let (data, response) = try await session.data(from: url)
             guard let httpResponse = response as? HTTPURLResponse,
                   httpResponse.statusCode == 200 else {
-                return nil
+                return .failure(.other)
             }
 
             guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -47,15 +64,19 @@ final class AmapGeocoderService {
                   let regeocode = json["regeocode"] as? [String: Any],
                   let formattedAddress = regeocode["formatted_address"] as? String,
                   !formattedAddress.isEmpty else {
-                return nil
+                // Quota exhaustion and no-result both land here; the caller
+                // falls back to the other backend.
+                return .failure(.other)
             }
 
-            // Build a shorter, place-oriented label from address components if available.
             let shortName = shortPlaceName(from: regeocode["addressComponent"] as? [String: Any])
-            return shortName ?? formattedAddress
+            return .success(shortName ?? formattedAddress)
+        } catch let error as URLError {
+            Log.geocode.error("Amap network failure for \(coordinate.latitude, privacy: .public),\(coordinate.longitude, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            return .failure(.network)
         } catch {
             Log.geocode.error("Amap reverse geocoding failed for \(coordinate.latitude, privacy: .public),\(coordinate.longitude, privacy: .public): \(error.localizedDescription, privacy: .public)")
-            return nil
+            return .failure(.other)
         }
     }
 
@@ -95,6 +116,11 @@ enum CoordinateConverter {
     private static let ee: Double = 0.00669342162296594323
 
     /// Convert a WGS-84 coordinate (GPS/Apple/EXIF) to GCJ-02 for Chinese map services.
+    /// Rough mainland-China bounding box used to pick a preferred backend.
+    static func isInChina(_ coordinate: CLLocationCoordinate2D) -> Bool {
+        isInChina(lng: coordinate.longitude, lat: coordinate.latitude)
+    }
+
     static func wgs84ToGcj02(_ coordinate: CLLocationCoordinate2D) -> CLLocationCoordinate2D {
         let lng = coordinate.longitude
         let lat = coordinate.latitude
