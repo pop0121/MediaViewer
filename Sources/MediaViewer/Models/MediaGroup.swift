@@ -10,17 +10,23 @@ struct MediaGroup: Identifiable, Hashable {
 }
 
 enum GroupingMode: String, CaseIterable, Identifiable {
-    case none
-    case date
+    case all
+    case years
+    case months
+    case days
     case location
 
     var id: String { rawValue }
 
     var displayName: String {
         switch self {
-        case .none: return "None"
-        case .date: return "Date"
-        case .location: return "Location"
+        case .all: return "All"
+        case .years: return "Years"
+        case .months: return "Months"
+        case .days: return "Days"
+        case .location: return "Places"
         }
     }
+
+    var isMap: Bool { self == .location }
 }

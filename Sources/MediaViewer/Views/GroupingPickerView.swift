@@ -10,6 +10,6 @@ struct GroupingPickerView: View {
             }
         }
         .pickerStyle(.segmented)
-        .frame(width: 220)
+        .frame(width: 360)
     }
 }

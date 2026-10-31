@@ -164,7 +164,7 @@ struct GalleryView: View {
     }
 
     private var gridCellWidth: CGFloat {
-        max(60, 160 / viewModel.effectiveZoomLevel)
+        max(60, 160 * viewModel.effectiveZoomLevel)
     }
 
     private var thumbnailTier: ThumbnailTier {
@@ -177,11 +177,18 @@ struct GalleryView: View {
         HStack(spacing: 16) {
             GroupingPickerView(mode: $viewModel.groupingMode)
 
-            HStack(spacing: 8) {
-                Image(systemName: "minus")
+            HStack(spacing: 6) {
+                Image(systemName: "square.grid.3x3")
+                Text("Small")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
                 Slider(value: $viewModel.zoomLevel, in: 0.3...2.0, step: 0.1)
                     .frame(width: 150)
-                Image(systemName: "plus")
+                    .help("Drag right for larger thumbnails")
+                Text("Large")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Image(systemName: "square.grid.2x2")
             }
 
             Spacer()

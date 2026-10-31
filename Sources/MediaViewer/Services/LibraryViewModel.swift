@@ -8,7 +8,7 @@ final class LibraryViewModel: ObservableObject {
     @Published var rootURL: URL?
     @Published var items: [MediaItem] = []
     @Published var groupedItems: [MediaGroup] = []
-    @Published var groupingMode: GroupingMode = .date
+    @Published var groupingMode: GroupingMode = .months
     @Published var zoomLevel: Double = 1.0
     @Published var isScanning = false
     @Published var scanProgress: String = ""
@@ -18,6 +18,9 @@ final class LibraryViewModel: ObservableObject {
     @Published var errorMessage: String?
     @Published var totalItemCount: Int = 0
     @Published private(set) var effectiveZoomLevel: Double = 1.0
+    /// Incremented whenever `groupedItems` is recomputed. Used by behavior tests
+    /// to prove zoom changes do not regroup.
+    private(set) var regroupCount = 0
 
     private(set) var persistence: PersistenceController?
     private var cancellables = Set<AnyCancellable>()
@@ -46,20 +49,19 @@ final class LibraryViewModel: ObservableObject {
         collapsedGroupIDsByMode = loadCollapsedGroupIDs()
 
         $zoomLevel
-            .debounce(for: .milliseconds(150), scheduler: DispatchQueue.main)
             .sink { [weak self] zoom in
                 self?.effectiveZoomLevel = zoom
             }
             .store(in: &cancellables)
 
         $items
-            .combineLatest($groupingMode, $effectiveZoomLevel)
-            .sink { [weak self] items, mode, zoom in
+            .combineLatest($groupingMode)
+            .sink { [weak self] items, mode in
                 guard let self else { return }
+                self.regroupCount += 1
                 self.groupedItems = self.group(
                     items: items,
                     mode: mode,
-                    zoom: zoom,
                     collapsedIDs: self.collapsedGroupIDs(for: mode)
                 )
             }
@@ -416,7 +418,6 @@ final class LibraryViewModel: ObservableObject {
         groupedItems = self.group(
             items: items,
             mode: mode,
-            zoom: effectiveZoomLevel,
             collapsedIDs: ids
         )
     }
@@ -440,24 +441,19 @@ final class LibraryViewModel: ObservableObject {
         }
     }
 
-    private func group(items: [MediaItem], mode: GroupingMode, zoom: Double, collapsedIDs: Set<String>) -> [MediaGroup] {
+    private func group(items: [MediaItem], mode: GroupingMode, collapsedIDs: Set<String>) -> [MediaGroup] {
         switch mode {
-        case .none:
+        case .all:
             return [MediaGroup(id: "all", title: "All Media", items: items)]
-        case .date:
-            return groupByDate(items: items, zoom: zoom, collapsedIDs: collapsedIDs)
+        case .years, .months, .days:
+            return groupByDate(items: items, mode: mode, collapsedIDs: collapsedIDs)
         case .location:
             return groupByLocation(items: items, collapsedIDs: collapsedIDs)
         }
     }
 
-    private func groupByDate(items: [MediaItem], zoom: Double, collapsedIDs: Set<String>) -> [MediaGroup] {
+    private func groupByDate(items: [MediaItem], mode: GroupingMode, collapsedIDs: Set<String>) -> [MediaGroup] {
         let calendar = Calendar.current
-        let granularity: DateGranularity = {
-            if zoom > 1.2 { return .day }
-            if zoom >= 0.7 { return .month }
-            return .year
-        }()
 
         var buckets: [String: [MediaItem]] = [:]
         for item in items {
@@ -467,10 +463,11 @@ final class LibraryViewModel: ObservableObject {
             }
             let keys = dateKeys(for: item, date: date, calendar: calendar)
             let key: String
-            switch granularity {
-            case .year: key = keys.year
-            case .month: key = keys.month
-            case .day: key = keys.day
+            switch mode {
+            case .years: key = keys.year
+            case .months: key = keys.month
+            case .days: key = keys.day
+            case .all, .location: continue
             }
             buckets[key, default: []].append(item)
         }
@@ -518,7 +515,4 @@ final class LibraryViewModel: ObservableObject {
         let day: String
     }
 
-    private enum DateGranularity {
-        case year, month, day
-    }
 }
