@@ -29,6 +29,7 @@ final class LibraryViewModel: ObservableObject {
     private var prefetchAnchor: Int?
     private var indexByID: [String: Int] = [:]
     private var locationIndices: [LocationKey: [Int]] = [:]
+    private var dateKeyCache: [String: DateKeys] = [:]
 
     private let collapsedGroupDefaultsKey = "collapsedGroupIDsByMode"
     private var collapsedGroupIDsByMode: [String: Set<String>] = [:]
@@ -50,11 +51,12 @@ final class LibraryViewModel: ObservableObject {
         $items
             .combineLatest($groupingMode, $effectiveZoomLevel)
             .sink { [weak self] items, mode, zoom in
-                self?.groupedItems = Self.group(
+                guard let self else { return }
+                self.groupedItems = self.group(
                     items: items,
                     mode: mode,
                     zoom: zoom,
-                    collapsedIDs: self?.collapsedGroupIDs(for: mode) ?? []
+                    collapsedIDs: self.collapsedGroupIDs(for: mode)
                 )
             }
             .store(in: &cancellables)
@@ -234,6 +236,7 @@ final class LibraryViewModel: ObservableObject {
         items = []
         indexByID = [:]
         locationIndices = [:]
+        dateKeyCache = [:]
         prefetchAnchor = nil
 
         let context = persistence.container.viewContext
@@ -310,7 +313,7 @@ final class LibraryViewModel: ObservableObject {
         collapsedGroupIDsByMode[mode.rawValue] = ids
         saveCollapsedGroupIDs()
 
-        groupedItems = Self.group(
+        groupedItems = self.group(
             items: items,
             mode: mode,
             zoom: effectiveZoomLevel,
@@ -337,7 +340,7 @@ final class LibraryViewModel: ObservableObject {
         }
     }
 
-    private static func group(items: [MediaItem], mode: GroupingMode, zoom: Double, collapsedIDs: Set<String>) -> [MediaGroup] {
+    private func group(items: [MediaItem], mode: GroupingMode, zoom: Double, collapsedIDs: Set<String>) -> [MediaGroup] {
         switch mode {
         case .none:
             return [MediaGroup(id: "all", title: "All Media", items: items)]
@@ -348,7 +351,7 @@ final class LibraryViewModel: ObservableObject {
         }
     }
 
-    private static func groupByDate(items: [MediaItem], zoom: Double, collapsedIDs: Set<String>) -> [MediaGroup] {
+    private func groupByDate(items: [MediaItem], zoom: Double, collapsedIDs: Set<String>) -> [MediaGroup] {
         let calendar = Calendar.current
         let granularity: DateGranularity = {
             if zoom > 1.2 { return .day }
@@ -362,7 +365,13 @@ final class LibraryViewModel: ObservableObject {
                 buckets["Unknown Date", default: []].append(item)
                 continue
             }
-            let key = dateKey(date: date, granularity: granularity, calendar: calendar)
+            let keys = dateKeys(for: item, date: date, calendar: calendar)
+            let key: String
+            switch granularity {
+            case .year: key = keys.year
+            case .month: key = keys.month
+            case .day: key = keys.day
+            }
             buckets[key, default: []].append(item)
         }
 
@@ -377,7 +386,7 @@ final class LibraryViewModel: ObservableObject {
         }
     }
 
-    private static func groupByLocation(items: [MediaItem], collapsedIDs: Set<String>) -> [MediaGroup] {
+    private func groupByLocation(items: [MediaItem], collapsedIDs: Set<String>) -> [MediaGroup] {
         var buckets: [String: [MediaItem]] = [:]
         for item in items {
             let key = item.locationName?.isEmpty == false ? item.locationName! : "Unknown Location"
@@ -389,18 +398,24 @@ final class LibraryViewModel: ObservableObject {
         }
     }
 
-    private static func dateKey(date: Date, granularity: DateGranularity, calendar: Calendar) -> String {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        switch granularity {
-        case .year:
-            formatter.dateFormat = "yyyy"
-        case .month:
-            formatter.dateFormat = "yyyy-MM"
-        case .day:
-            formatter.dateFormat = "yyyy-MM-dd"
+    /// Date group keys are computed once per item and reused for every regroup.
+    private func dateKeys(for item: MediaItem, date: Date, calendar: Calendar) -> DateKeys {
+        if let cached = dateKeyCache[item.id] {
+            return cached
         }
-        return formatter.string(from: date)
+        let components = calendar.dateComponents([.year, .month, .day], from: date)
+        let year = String(format: "%04d", components.year ?? 0)
+        let month = String(format: "%@-%02d", year, components.month ?? 0)
+        let day = String(format: "%@-%02d", month, components.day ?? 0)
+        let keys = DateKeys(year: year, month: month, day: day)
+        dateKeyCache[item.id] = keys
+        return keys
+    }
+
+    private struct DateKeys {
+        let year: String
+        let month: String
+        let day: String
     }
 
     private enum DateGranularity {
