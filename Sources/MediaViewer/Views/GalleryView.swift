@@ -42,10 +42,30 @@ struct GalleryView: View {
         VStack(spacing: 0) {
             toolbar(rootURL: rootURL)
 
+            if viewModel.isScanning {
+                HStack(spacing: 8) {
+                    if let fraction = viewModel.scanFraction {
+                        ProgressView(value: fraction)
+                            .frame(width: 160)
+                    } else {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                    Text(viewModel.scanProgress)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                    Spacer()
+                    Button("Cancel") { viewModel.cancelScan() }
+                        .controlSize(.small)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 4)
+                .background(Color(nsColor: .controlBackgroundColor))
+            }
+
             if viewModel.isScanning && viewModel.items.isEmpty {
-                ProgressView(viewModel.scanProgress)
-                    .progressViewStyle(.linear)
-                    .padding()
+                Color.clear
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if viewModel.items.isEmpty {
                 VStack(spacing: 12) {

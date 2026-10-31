@@ -54,7 +54,7 @@ final class AmapGeocoderService {
             let shortName = shortPlaceName(from: regeocode["addressComponent"] as? [String: Any])
             return shortName ?? formattedAddress
         } catch {
-            print("Amap reverse geocoding failed for \(coordinate): \(error.localizedDescription)")
+            Log.geocode.error("Amap reverse geocoding failed for \(coordinate.latitude, privacy: .public),\(coordinate.longitude, privacy: .public): \(error.localizedDescription, privacy: .public)")
             return nil
         }
     }

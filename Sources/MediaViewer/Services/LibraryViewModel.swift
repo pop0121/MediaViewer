@@ -138,15 +138,21 @@ final class LibraryViewModel: ObservableObject {
         guard let persistence else { return }
 
         do {
+            let scanInterval = Perf.begin("scan.total")
             let result = try await rootURL.withSecurityScope {
                 let backgroundContext = persistence.container.newBackgroundContext()
                 let scanner = MediaScanner(context: backgroundContext)
-                return try await scanner.scan(rootURL: rootURL)
+                return try await scanner.scan(rootURL: rootURL) { [weak self] progress in
+                    await self?.updateScanProgress(progress)
+                }
             }
+            Perf.end(scanInterval, "processed=\(result.processed) removed=\(result.removed)")
 
             // Publish the grid as soon as the index is ready. Thumbnails are
             // generated on demand by the grid, and geocoding runs afterwards.
+            let fetchInterval = Perf.begin("library.firstScreenFetch")
             await fetchItems()
+            Perf.end(fetchInterval, "total=\(totalItemCount)")
             scanProgress = "Indexed \(result.processed) new/changed items, \(totalItemCount) total."
             startMaintenance(rootURL: rootURL)
         } catch is CancellationError {
@@ -154,6 +160,28 @@ final class LibraryViewModel: ObservableObject {
         } catch {
             errorMessage = "Scan failed: \(error.localizedDescription)"
         }
+    }
+
+    private func updateScanProgress(_ progress: ScanProgress) {
+        switch progress.phase {
+        case .enumerating:
+            scanProgress = "Scanning… \(progress.completed) files found"
+            scanFraction = nil
+        case .indexing:
+            scanProgress = "Indexing \(progress.completed) of \(progress.total)…"
+            scanFraction = progress.total > 0
+                ? Double(progress.completed) / Double(progress.total)
+                : nil
+        case .saving:
+            scanProgress = "Saving index…"
+            scanFraction = 1
+        }
+    }
+
+    /// Cancel the current scan. Partial results are kept; the next scan resumes.
+    func cancelScan() {
+        cancelWork()
+        scanProgress = "Cancelling…"
     }
 
     /// Post-scan work that must not delay the first screen: thumbnail cleanup
@@ -170,6 +198,7 @@ final class LibraryViewModel: ObservableObject {
 
     private func purgeOrphanedThumbnails(rootURL: URL) async {
         guard let persistence else { return }
+        let interval = Perf.begin("maintenance.purgeThumbnails")
         let context = persistence.container.newBackgroundContext()
         let validInputs = await context.perform {
             let request = NSFetchRequest<MediaItemEntity>(entityName: "MediaItemEntity")
@@ -186,14 +215,17 @@ final class LibraryViewModel: ObservableObject {
         await rootURL.withSecurityScope {
             await ThumbnailGenerator.shared.purgeOrphanedThumbnails(rootURL: rootURL, validInputs: validInputs)
         }
+        Perf.end(interval, "valid=\(validInputs.count)")
     }
 
     private func geocodeLocations(rootURL: URL) async {
         guard let persistence else { return }
+        let interval = Perf.begin("maintenance.geocode")
         let context = persistence.container.newBackgroundContext()
         await GeocoderService.shared.geocodeUncachedCoordinates(in: context) { [weak self] resolved in
             await self?.applyLocationName(resolved)
         }
+        Perf.end(interval)
     }
 
     private func applyLocationName(_ resolved: GeocodedLocation) {

@@ -16,12 +16,19 @@ final class MediaScanner {
     }
 
     /// Scan the root URL and update the Core Data index. Returns the number of new/changed items processed.
-    func scan(rootURL: URL) async throws -> ScanResult {
-        try await self._scan(rootURL: rootURL)
+    func scan(
+        rootURL: URL,
+        progress: (@Sendable (ScanProgress) async -> Void)? = nil
+    ) async throws -> ScanResult {
+        try await self._scan(rootURL: rootURL, progress: progress)
     }
 
-    private func _scan(rootURL: URL) async throws -> ScanResult {
+    private func _scan(
+        rootURL: URL,
+        progress: (@Sendable (ScanProgress) async -> Void)?
+    ) async throws -> ScanResult {
         let fileManager = FileManager.default
+        let enumerateInterval = Perf.begin("scan.enumerate")
 
         // 1. Enumerate the filesystem and collect files that need (re)indexing.
         var discoveredRelativePaths = Set<String>()
@@ -32,14 +39,20 @@ final class MediaScanner {
             includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey, .isDirectoryKey],
             options: [.skipsHiddenFiles],
             errorHandler: { url, error in
-                print("Enumerator error at \(url): \(error.localizedDescription)")
+                Log.scan.error("Enumerator error at \(url.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
                 return true
             }
         ) else {
             throw ScanError.enumerationFailed
         }
 
+        var enumeratedCount = 0
         while let fileURL = enumerator.nextObject() as? URL {
+            enumeratedCount += 1
+            if enumeratedCount % 256 == 0 {
+                try Task.checkCancellation()
+                await progress?(ScanProgress(phase: .enumerating, completed: enumeratedCount, total: 0))
+            }
             let relativePath = fileURL.path(relativeTo: rootURL)
 
             // Skip our own cache directory and any explicitly-hidden system folders.
@@ -64,12 +77,15 @@ final class MediaScanner {
                 fileSize: fileSize
             ))
         }
+        Perf.end(enumerateInterval, "enumerated=\(enumeratedCount) media=\(changedFiles.count)")
+        try Task.checkCancellation()
 
         // 2. Load the existing index so we can skip unchanged files quickly.
         let existingItems = try await context.perform {
             try self.fetchAllItems()
         }
         var itemsByPath: [String: MediaItemEntity] = [:]
+        itemsByPath.reserveCapacity(existingItems.count)
         for item in existingItems {
             itemsByPath[item.relativePath] = item
         }
@@ -83,13 +99,21 @@ final class MediaScanner {
         }
 
         // 3. Extract metadata concurrently with bounded parallelism.
+        await progress?(ScanProgress(phase: .indexing, completed: 0, total: filesNeedingMetadata.count))
+        let metadataInterval = Perf.begin("scan.metadata")
         let extractedMetadata = try await extractMetadataConcurrently(
             files: filesNeedingMetadata,
-            limit: Self.maxConcurrentExtractions
+            limit: Self.maxConcurrentExtractions,
+            progress: progress
         )
+        Perf.end(metadataInterval, "changed=\(filesNeedingMetadata.count)")
+        try Task.checkCancellation()
 
         // 4. Apply all updates in a single Core Data perform block.
         let processed = extractedMetadata.count
+        await progress?(ScanProgress(phase: .saving, completed: processed, total: filesNeedingMetadata.count))
+        let removedPaths = Set(itemsByPath.keys).subtracting(discoveredRelativePaths)
+        let saveInterval = Perf.begin("scan.save")
         try await context.perform {
             for (file, metadata) in extractedMetadata {
                 let entity: MediaItemEntity
@@ -116,7 +140,6 @@ final class MediaScanner {
             }
 
             // Remove entries for deleted files.
-            let removedPaths = Set(itemsByPath.keys).subtracting(discoveredRelativePaths)
             let thumbnailGenerator = ThumbnailGenerator.shared
             for path in removedPaths {
                 if let entity = itemsByPath[path] {
@@ -132,14 +155,16 @@ final class MediaScanner {
 
             try self.context.save()
         }
+        Perf.end(saveInterval, "processed=\(processed) removed=\(removedPaths.count)")
 
-        return ScanResult(processed: processed, removed: discoveredRelativePaths.count + itemsByPath.count - processed)
+        return ScanResult(processed: processed, removed: removedPaths.count)
     }
 
     /// Extract metadata for many files concurrently, but never more than `limit` at a time.
     private func extractMetadataConcurrently(
         files: [FileToIndex],
-        limit: Int
+        limit: Int,
+        progress: (@Sendable (ScanProgress) async -> Void)?
     ) async throws -> [(FileToIndex, ExtractedMetadata)] {
         var results: [(FileToIndex, ExtractedMetadata)] = []
         results.reserveCapacity(files.count)
@@ -147,6 +172,7 @@ final class MediaScanner {
         // Process in sliding windows to bound memory and AVAsset concurrency.
         let chunks = files.chunked(into: limit)
         for chunk in chunks {
+            try Task.checkCancellation()
             let chunkResults = await withTaskGroup(of: (FileToIndex, ExtractedMetadata).self) { group in
                 for file in chunk {
                     group.addTask {
@@ -161,6 +187,7 @@ final class MediaScanner {
                 return collected
             }
             results.append(contentsOf: chunkResults)
+            await progress?(ScanProgress(phase: .indexing, completed: results.count, total: files.count))
         }
 
         return results
@@ -211,4 +238,17 @@ extension Array {
             Array(self[start..<Swift.min(start + size, count)])
         }
     }
+}
+
+
+struct ScanProgress: Sendable {
+    enum Phase: String, Sendable {
+        case enumerating
+        case indexing
+        case saving
+    }
+
+    let phase: Phase
+    let completed: Int
+    let total: Int
 }

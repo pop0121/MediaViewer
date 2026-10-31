@@ -91,7 +91,7 @@ final class GeocoderService: NSObject {
                     failedCoordinates.insert(key)
 
                     if consecutiveNetworkFailures >= maxConsecutiveFailures {
-                        print("Reverse geocoding aborted after \(consecutiveNetworkFailures) network failures.")
+                        Log.geocode.error("Reverse geocoding aborted after \(consecutiveNetworkFailures) network failures")
                         await markUnknown(context: context, groups: Array(coordinateGroups.dropFirst(index)))
                         return
                     }
@@ -171,7 +171,7 @@ final class GeocoderService: NSObject {
                     break
                 }
             }
-            print("Reverse geocoding failed for \(coordinate): \(error.localizedDescription)")
+            Log.geocode.error("Reverse geocoding failed for \(coordinate.latitude, privacy: .public),\(coordinate.longitude, privacy: .public): \(error.localizedDescription, privacy: .public)")
             return .failure(.other)
         }
     }

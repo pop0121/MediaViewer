@@ -241,7 +241,7 @@ final class ThumbnailGenerator: @unchecked Sendable {
             let (cgImage, _) = try await generator.image(at: time)
             return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
         } catch {
-            print("Failed to generate video thumbnail for \(url): \(error.localizedDescription)")
+            Log.thumbnails.error("Failed to generate video thumbnail for \(url.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
             return nil
         }
     }
