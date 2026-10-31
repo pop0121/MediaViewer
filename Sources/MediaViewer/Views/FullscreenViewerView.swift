@@ -12,6 +12,7 @@ struct FullscreenViewerView: View {
     @State private var videoIsPlaying = true
     @State private var eventMonitor: Any?
     @StateObject private var imageLoader = ViewerImageLoader()
+    @AppStorage("videoEnhancementEnabled") private var videoEnhancementEnabled = false
 
     private var currentIndex: Int? {
         guard let selected = viewModel.selectedItem else { return nil }
@@ -38,6 +39,30 @@ struct FullscreenViewerView: View {
             VStack {
                 HStack {
                     Spacer()
+                    if currentItem?.isVideo == true {
+                        Button {
+                            videoEnhancementEnabled.toggle()
+                        } label: {
+                            Label(
+                                videoEnhancementEnabled ? "Enhance On" : "Enhance",
+                                systemImage: "wand.and.stars"
+                            )
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(videoEnhancementEnabled ? Color.black : Color.white)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .background(
+                                videoEnhancementEnabled
+                                    ? AnyShapeStyle(Color.white.opacity(0.9))
+                                    : AnyShapeStyle(.ultraThinMaterial)
+                            )
+                            .clipShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Toggle video enhancement")
+                        .help("Median denoise and detail sharpen at source resolution")
+                        .padding(.trailing, 8)
+                    }
                     Button(action: close) {
                         Image(systemName: "xmark")
                             .font(.title2)
@@ -87,8 +112,12 @@ struct FullscreenViewerView: View {
     private func content(for item: MediaItem) -> some View {
         if item.isVideo {
             if let url = rootURL.appendingPathComponent(item.relativePath) as URL? {
-                VideoPlayerView(url: url, isPlaying: $videoIsPlaying)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                VideoPlayerView(
+                    url: url,
+                    isPlaying: $videoIsPlaying,
+                    enhancementEnabled: videoEnhancementEnabled
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         } else {
             if let image = imageLoader.highResImage ?? imageLoader.screenImage ?? imageLoader.placeholder {
