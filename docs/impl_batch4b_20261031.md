@@ -72,5 +72,9 @@
 
 ## macmini 收尾
 
-- 待本批 commit 后同步 `~/Workspaces/media-viewer`，`swift build -c release`，重打
-  `~/Applications/MediaViewer.app`（`local.guofu.mediaviewer`、`0.4b-batch4b`、adhoc），并做 5s 冒烟。
+- 代码同步到 macmini `~/Workspaces/media-viewer`（排除 `.build`/`.git`/`.mediaviewer`），
+  对应本地 commit `f0290fc`。
+- macmini `swift build -c release` 通过，18.01s。
+- 重打 `~/Applications/MediaViewer.app`：`CFBundleIdentifier=local.guofu.mediaviewer`、
+  `CFBundleShortVersionString=0.4b-batch4b`、adhoc codesign。
+- 5s 冒烟：进程 3s 时仍运行（`smoke_running=yes`，pid 12708），日志 0 行，无崩溃输出。
