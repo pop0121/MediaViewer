@@ -127,14 +127,14 @@ final class ThumbnailGenerator: @unchecked Sendable {
             return ThumbnailImage(image: cached)
         }
 
+        let sourceURL = rootURL.appendingPathComponent(input.relativePath)
         if FileManager.default.fileExists(atPath: thumbnailURL.path) {
-            if let image = loadDecodedThumbnail(at: thumbnailURL, tier: tier) {
+            if let image = loadDecodedThumbnail(at: thumbnailURL, tier: tier),
+               isThumbnailAdequate(image, tier: tier, sourceURL: sourceURL) {
                 cache(for: tier).setObject(image, forKey: cacheKey, cost: image.cost)
                 return ThumbnailImage(image: image)
             }
         }
-
-        let sourceURL = rootURL.appendingPathComponent(input.relativePath)
         guard FileManager.default.fileExists(atPath: sourceURL.path) else { return nil }
 
         let image = await generateThumbnail(for: input, tier: tier, sourceURL: sourceURL)
@@ -187,8 +187,10 @@ final class ThumbnailGenerator: @unchecked Sendable {
         if let cached = cache(for: tier).object(forKey: key) {
             return cached
         }
+        let sourceURL = rootURL.appendingPathComponent(input.relativePath)
         guard FileManager.default.fileExists(atPath: url.path),
-              let image = loadDecodedThumbnail(at: url, tier: tier) else { return nil }
+              let image = loadDecodedThumbnail(at: url, tier: tier),
+              isThumbnailAdequate(image, tier: tier, sourceURL: sourceURL) else { return nil }
         cache(for: tier).setObject(image, forKey: key, cost: image.cost)
         return image
     }
@@ -244,24 +246,52 @@ final class ThumbnailGenerator: @unchecked Sendable {
     private func generatePhotoThumbnail(from url: URL, tier: ThumbnailTier) -> NSImage? {
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
 
-        // Grid thumbnails use the embedded EXIF thumbnail when present (fast);
-        // full-screen placeholders always downsample the full image.
+        let target = tier.maxPixelSize
         var options: [NSString: Any] = [
             kCGImageSourceShouldCache: false,
             kCGImageSourceShouldCacheImmediately: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: tier.maxPixelSize
+            kCGImageSourceThumbnailMaxPixelSize: target
         ]
+
+        // Only the grid tier tries an embedded EXIF preview. Even there it is
+        // accepted only when its long edge reaches the physical target; a
+        // 160px preview must not be used for a 320px grid layer. Larger tiers
+        // decode the full image directly (their targets are far above typical
+        // embedded previews).
         if tier == .grid {
             options[kCGImageSourceCreateThumbnailFromImageIfAbsent] = true
-        } else {
-            options[kCGImageSourceCreateThumbnailFromImageAlways] = true
+            if let candidate = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary),
+               max(candidate.width, candidate.height) >= target {
+                return NSImage(cgImage: candidate, size: NSSize(width: candidate.width, height: candidate.height))
+            }
+            options[kCGImageSourceCreateThumbnailFromImageIfAbsent] = nil
         }
 
+        options[kCGImageSourceCreateThumbnailFromImageAlways] = true
         guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
             return nil
         }
         return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+    }
+
+    /// A stored tier is reusable when it reaches the physical target, or when
+    /// the source itself is smaller than the target (upscaling cannot add detail).
+    private func isThumbnailAdequate(_ image: NSImage, tier: ThumbnailTier, sourceURL: URL) -> Bool {
+        let longEdge = max(image.size.width, image.size.height)
+        let target = CGFloat(tier.maxPixelSize)
+        guard longEdge < target else { return true }
+        // Video sources cannot be inspected with ImageIO. Keep their existing
+        // poster rather than regenerating it on every access; their target is
+        // bounded by decoded video dimensions, not by an embedded image preview.
+        guard let source = CGImageSourceCreateWithURL(sourceURL as CFURL, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = props[kCGImagePropertyPixelWidth] as? Int,
+              let height = props[kCGImagePropertyPixelHeight] as? Int else {
+            return true
+        }
+        let sourceLongEdge = CGFloat(max(width, height))
+        return longEdge >= min(target, sourceLongEdge)
     }
 
     private func generateVideoThumbnail(from url: URL, tier: ThumbnailTier) async -> NSImage? {
