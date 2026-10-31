@@ -84,7 +84,15 @@ struct PlacesMapView: NSViewRepresentable {
 
         private func refreshClusters(region: MKCoordinateRegion) {
             guard let mapView else { return }
-            let clusters = PlacesClusterer.clusters(items: items, region: region)
+            let geoClusters = PlacesClusterer.clusters(items: items, region: region)
+            let viewport = mapView.bounds.size.width > 1 && mapView.bounds.size.height > 1
+                ? mapView.bounds.size
+                : CGSize(width: 1000, height: 700)
+            let clusters = PlacesClusterer.mergeOnScreen(
+                clusters: geoClusters,
+                region: region,
+                viewportSize: viewport
+            )
             let annotations = clusters.map(PhotoClusterAnnotation.init)
             mapView.removeAnnotations(mapView.annotations)
             mapView.addAnnotations(annotations)

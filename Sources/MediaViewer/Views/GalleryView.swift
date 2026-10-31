@@ -50,7 +50,11 @@ struct GalleryView: View {
                 ClusterBreadcrumbView(label: clusterLabel) {
                     viewModel.backToMap()
                 }
-            } else if viewModel.hasTimeFocus && !viewModel.groupingMode.isMap {
+            } else if viewModel.groupingMode == .years
+                        || viewModel.groupingMode == .months
+                        || viewModel.groupingMode == .days {
+                // Always reserve this row in time views: a breadcrumb that
+                // appears mid-scroll would change the viewport height and jump.
                 TimeBreadcrumbView(viewModel: viewModel)
             }
 
@@ -110,6 +114,7 @@ struct GalleryView: View {
 
     @ViewBuilder
     private func gridContent(rootURL: URL) -> some View {
+        ScrollViewReader { proxy in
         ScrollView {
             LazyVGrid(
                 columns: gridColumns,
@@ -158,6 +163,7 @@ struct GalleryView: View {
                         .buttonStyle(.plain)
                         .background(Color(nsColor: .controlBackgroundColor))
                         .background(SectionFrameReader(id: group.id, coordinateSpace: "gridScroll"))
+                        .id(group.id)
                     }
                 }
             }
@@ -181,6 +187,13 @@ struct GalleryView: View {
             }
         }
         .coordinateSpace(name: "gridScroll")
+        .onChange(of: viewModel.scrollTarget) { target in
+            guard let target else { return }
+            DispatchQueue.main.async {
+                proxy.scrollTo(target.groupID, anchor: .top)
+            }
+        }
+        }
     }
 
     @ViewBuilder

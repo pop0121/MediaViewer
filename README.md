@@ -7,11 +7,14 @@ A native macOS app for browsing photos and videos stored in a user-selected root
 - Choose a root folder on launch (stored with a security-scoped bookmark for relaunch).
 - Recursively scans for `.jpg`, `.jpeg`, `.mp4`, and `.mov` files.
 - Extracts creation date and GPS location metadata from EXIF and QuickTime metadata.
-- Displays media in a zoomable grid with pinned date section headers.
+- Displays media in a density-adjustable grid (0.5×–2.0×, AppStorage, ⌘−/⌘+)
+  with pinned date section headers.
 - Time grouping is explicit: All / Years / Months / Days (default Months);
-  zoom only changes thumbnail size.
-- Places mode shows a MapKit map with local clustering, badges, tap-to-zoom,
-  and a "Show Grid in This Area" action.
+  switching granularity lands on the viewport anchor without filtering the
+  timeline, and the All / year / month breadcrumb follows scrolling.
+- Places mode shows a MapKit map with clustered representative-photo cards;
+  screen-space merging prevents pin overlap, and a cluster opens its own grid
+  with a `‹ Map` return.
 - Shows determinate scan progress and allows cancelling; partial results are kept.
 - Click an item to open a full-window overlay viewer with animated transitions.
 - Navigate with arrow keys, close with `Esc`, toggle video play/pause with `Space`.

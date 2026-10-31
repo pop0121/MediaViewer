@@ -141,6 +141,115 @@ enum PlacesClusterer {
         }
     }
 
+    // MARK: - Screen-space merge
+
+    /// Card frame used by `PhotoClusterAnnotationView`.
+    static let pinCardSize = CGSize(width: 86, height: 74)
+    /// Gap around a card before two pins count as overlapping.
+    static let screenMergePadding: CGFloat = 6
+    /// ~one card width; documented threshold for centre-distance merging.
+    static let screenMergeThreshold: CGFloat = pinCardSize.width + screenMergePadding
+
+    /// Second clustering pass in screen space. Geo buckets whose card frames
+    /// would intersect are unioned and re-centred, repeating until no pair
+    /// overlaps. Members and counts are the union of the inputs.
+    static func mergeOnScreen(
+        clusters: [PhotoCluster],
+        region: MKCoordinateRegion,
+        viewportSize: CGSize
+    ) -> [PhotoCluster] {
+        guard clusters.count > 1,
+              viewportSize.width > 1,
+              viewportSize.height > 1 else { return clusters }
+
+        var current = clusters
+        let maxPasses = max(clusters.count, 2)
+        for _ in 0..<maxPasses {
+            let points = current.map {
+                screenPoint(for: $0.coordinate, region: region, viewportSize: viewportSize)
+            }
+            var parent = Array(0..<current.count)
+            func find(_ value: Int) -> Int {
+                var value = value
+                while parent[value] != value {
+                    parent[value] = parent[parent[value]]
+                    value = parent[value]
+                }
+                return value
+            }
+            func union(_ lhs: Int, _ rhs: Int) {
+                let a = find(lhs)
+                let b = find(rhs)
+                if a != b { parent[b] = a }
+            }
+
+            var merged = false
+            let maxX = pinCardSize.width + screenMergePadding
+            let maxY = pinCardSize.height + screenMergePadding
+            for i in 0..<current.count {
+                for j in (i + 1)..<current.count {
+                    let dx = abs(points[i].x - points[j].x)
+                    let dy = abs(points[i].y - points[j].y)
+                    let distance = (dx * dx + dy * dy).squareRoot()
+                    // Frame intersection is the acceptance contract; the
+                    // distance check keeps near-diagonal pins apart too.
+                    if (dx < maxX && dy < maxY) || distance < screenMergeThreshold {
+                        union(i, j)
+                        merged = true
+                    }
+                }
+            }
+            guard merged else { return current }
+
+            var groups: [Int: [PhotoCluster]] = [:]
+            for index in current.indices {
+                groups[find(index), default: []].append(current[index])
+            }
+            current = groups.values.map { group in
+                let items = group.flatMap(\.items)
+                let coordinates = items.compactMap(\.coordinate)
+                let latitude = coordinates.map(\.latitude).reduce(0, +) / Double(max(coordinates.count, 1))
+                let longitude = coordinates.map(\.longitude).reduce(0, +) / Double(max(coordinates.count, 1))
+                let minID = items.map(\.id).min() ?? group.first?.id ?? "unknown"
+                return PhotoCluster(
+                    id: "screen-\(minID)-\(items.count)",
+                    coordinate: CLLocationCoordinate2D(latitude: latitude, longitude: longitude),
+                    items: items
+                )
+            }
+            .sorted { lhs, rhs in
+                lhs.count == rhs.count ? lhs.id < rhs.id : lhs.count > rhs.count
+            }
+        }
+        return current
+    }
+
+    /// Project a coordinate into the current map viewport. MapKit uses a
+    /// Mercator projection, so map points are used rather than linear latitude.
+    static func screenPoint(
+        for coordinate: CLLocationCoordinate2D,
+        region: MKCoordinateRegion,
+        viewportSize: CGSize
+    ) -> CGPoint {
+        let halfLat = max(region.span.latitudeDelta / 2, 1e-9)
+        let halfLon = max(region.span.longitudeDelta / 2, 1e-9)
+        let topLeft = MKMapPoint(CLLocationCoordinate2D(
+            latitude: region.center.latitude + halfLat,
+            longitude: region.center.longitude - halfLon
+        ))
+        let bottomRight = MKMapPoint(CLLocationCoordinate2D(
+            latitude: region.center.latitude - halfLat,
+            longitude: region.center.longitude + halfLon
+        ))
+        let width = max(bottomRight.x - topLeft.x, 1e-9)
+        let height = max(bottomRight.y - topLeft.y, 1e-9)
+        let point = MKMapPoint(coordinate)
+        return CGPoint(
+            x: (point.x - topLeft.x) / width * viewportSize.width,
+            y: (point.y - topLeft.y) / height * viewportSize.height
+        )
+    }
+
     /// Region that fits every coordinate, with a small margin. Used when
     /// tapping a multi-photo cluster.
     static func fittingRegion(for items: [MediaItem], minimumSpan: Double = 0.002) -> MKCoordinateRegion? {

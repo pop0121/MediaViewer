@@ -11,6 +11,7 @@ final class LibraryViewModel: ObservableObject {
     @Published var groupedItems: [MediaGroup] = []
     @Published var groupingMode: GroupingMode = .months
     @Published private(set) var timeFocus: TimeAnchor?
+    @Published private(set) var scrollTarget: TimeScrollTarget?
     @Published private(set) var clusterSelection: Set<String>?
     @Published private(set) var clusterLabel: String?
     @Published var lastMapRegion: MKCoordinateRegion?
@@ -38,6 +39,12 @@ final class LibraryViewModel: ObservableObject {
     /// Incremented whenever `groupedItems` is recomputed. Used by behavior tests
     /// to prove zoom changes do not regroup.
     private(set) var regroupCount = 0
+    /// Number of viewport-driven breadcrumb changes. Tests use this to prove
+    /// scrolling across a month boundary updates once, without regrouping.
+    private(set) var timeFollowCount = 0
+    /// Model-side landing request latency, in milliseconds.
+    private(set) var lastLandingRequestMS: Double = 0
+    private var scrollTargetToken = 0
 
     private(set) var persistence: PersistenceController?
     private var cancellables = Set<AnyCancellable>()
@@ -91,11 +98,9 @@ final class LibraryViewModel: ObservableObject {
             .store(in: &cancellables)
 
         $items
-            .combineLatest($groupingMode, $regionFilter, $timeFocus)
-            .combineLatest($clusterSelection)
-            .sink { [weak self] combined, clusterSelection in
+            .combineLatest($groupingMode, $regionFilter, $clusterSelection)
+            .sink { [weak self] items, mode, regionFilter, clusterSelection in
                 guard let self else { return }
-                let (items, mode, regionFilter, _) = combined
                 self.regroupCount += 1
                 var scoped = items
                 if let clusterSelection {
@@ -106,9 +111,10 @@ final class LibraryViewModel: ObservableObject {
                         return regionFilter.contains(coordinate)
                     }
                 }
-                let filtered = self.applyTimeFocus(scoped, mode: mode)
+                // Time focus is a viewport anchor, never a hard filter: the
+                // grouped timeline stays complete.
                 self.groupedItems = self.group(
-                    items: filtered,
+                    items: scoped,
                     mode: mode,
                     collapsedIDs: self.collapsedGroupIDs(for: mode)
                 )
@@ -488,12 +494,33 @@ final class LibraryViewModel: ObservableObject {
     }
 
     /// Feed the topmost visible section from the grid's geometry observer.
-    /// This only records the anchor; it never regroups by itself.
+    /// The section updates the breadcrumb/segment anchor only; it never regroups
+    /// and never changes the scroll target, so scrolling remains uninterrupted.
     func updateTopSection(_ groupID: String?) {
-        topAnchor = groupID.flatMap(TimeAnchor.init(groupID:))
+        let anchor = groupID.flatMap(TimeAnchor.init(groupID:))
+        guard anchor != topAnchor else { return }
+        topAnchor = anchor
+        guard groupingMode != .all,
+              groupingMode != .location,
+              clusterSelection == nil else { return }
+
+        let focus: TimeAnchor?
+        switch groupingMode {
+        case .years:
+            focus = anchor.map { TimeAnchor(year: $0.year) }
+        case .months, .days:
+            focus = anchor.map { TimeAnchor(year: $0.year, month: $0.month) }
+        case .all, .location:
+            focus = nil
+        }
+        if focus != timeFocus {
+            timeFocus = focus
+            timeFollowCount += 1
+        }
     }
 
-    /// Change granularity while inheriting the current year/month focus.
+    /// Change granularity while carrying the current anchor forward. The full
+    /// timeline is retained; the UI scrolls the anchor section to the top.
     func selectGranularity(_ mode: GroupingMode) {
         if clusterSelection != nil {
             clusterSelection = nil
@@ -502,62 +529,109 @@ final class LibraryViewModel: ObservableObject {
         guard mode != groupingMode else { return }
         let base = topAnchor ?? timeFocus
 
+        groupingMode = mode
+        topAnchor = nil
+        scrollTarget = nil
+
         switch mode {
-        case .all:
-            timeFocus = nil
-        case .location:
+        case .all, .location:
             timeFocus = nil
         case .years:
-            timeFocus = base.map { TimeAnchor(year: $0.year) }
+            guard let base else { timeFocus = nil; return }
+            let anchor = TimeAnchor(year: base.year)
+            timeFocus = anchor
+            requestLanding(on: .years, anchor: anchor)
         case .months:
-            if groupingMode == .days || groupingMode == .location {
-                timeFocus = base.flatMap { anchor in
-                    guard let month = anchor.month else { return TimeAnchor(year: anchor.year) }
-                    return TimeAnchor(year: anchor.year, month: month)
-                }
-            } else {
-                timeFocus = base.map { TimeAnchor(year: $0.year) }
-            }
+            guard let base else { timeFocus = nil; return }
+            let anchor = TimeAnchor(year: base.year, month: base.month)
+            timeFocus = anchor
+            requestLanding(on: .months, anchor: anchor)
         case .days:
-            timeFocus = base.map { TimeAnchor(year: $0.year, month: $0.month) }
+            guard let base else { timeFocus = nil; return }
+            timeFocus = TimeAnchor(year: base.year, month: base.month)
+            requestLanding(on: .days, anchor: base)
         }
+    }
 
-        topAnchor = nil
-        groupingMode = mode
+    private func requestLanding(on mode: GroupingMode, anchor: TimeAnchor) {
+        let start = CFAbsoluteTimeGetCurrent()
+        defer { lastLandingRequestMS = (CFAbsoluteTimeGetCurrent() - start) * 1000 }
+        guard let groupID = landingGroupID(mode: mode, anchor: anchor) else { return }
+        scrollTargetToken += 1
+        scrollTarget = TimeScrollTarget(groupID: groupID, token: scrollTargetToken)
+    }
+
+    private func landingGroupID(mode: GroupingMode, anchor: TimeAnchor) -> String? {
+        let ids = Set(groupedItems.map(\.id))
+        switch mode {
+        case .years:
+            let id = String(format: "%04d", anchor.year)
+            return ids.contains(id) ? id : nil
+        case .months:
+            if let month = anchor.month {
+                let id = String(format: "%04d-%02d", anchor.year, month)
+                if ids.contains(id) { return id }
+            }
+            return groupedItems.first { $0.id.hasPrefix(String(format: "%04d-", anchor.year)) }?.id
+        case .days:
+            if let month = anchor.month, let day = anchor.day {
+                let id = String(format: "%04d-%02d-%02d", anchor.year, month, day)
+                if ids.contains(id) { return id }
+            }
+            if let month = anchor.month {
+                let prefix = String(format: "%04d-%02d-", anchor.year, month)
+                if let id = groupedItems.first(where: { $0.id.hasPrefix(prefix) })?.id {
+                    return id
+                }
+            }
+            let prefix = String(format: "%04d-", anchor.year)
+            return groupedItems.first { $0.id.hasPrefix(prefix) }?.id
+        case .all, .location:
+            return nil
+        }
     }
 
     /// Pop one breadcrumb level: month -> year, year -> full timeline.
     func goBackOneLevel() {
         guard let focus = timeFocus else { return }
         if focus.month != nil {
-            timeFocus = TimeAnchor(year: focus.year)
-            groupingMode = .months
+            let anchor = TimeAnchor(year: focus.year)
+            groupingMode = .years
+            timeFocus = anchor
+            topAnchor = anchor
+            requestLanding(on: .years, anchor: anchor)
         } else {
-            timeFocus = nil
-            groupingMode = .all
+            showAllTimeline()
         }
-        topAnchor = nil
     }
 
     func focus(on level: TimeBreadcrumbItem.Level) {
         clusterSelection = nil
         clusterLabel = nil
+        topAnchor = nil
+        scrollTarget = nil
         switch level {
         case .all:
             showAllTimeline()
         case .year(let year):
-            timeFocus = TimeAnchor(year: year)
+            let anchor = TimeAnchor(year: year)
             groupingMode = .years
+            timeFocus = anchor
+            topAnchor = anchor
+            requestLanding(on: .years, anchor: anchor)
         case .month(let year, let month):
-            timeFocus = TimeAnchor(year: year, month: month)
+            let anchor = TimeAnchor(year: year, month: month)
             groupingMode = .months
+            timeFocus = anchor
+            topAnchor = anchor
+            requestLanding(on: .months, anchor: anchor)
         }
-        topAnchor = nil
     }
 
     func showAllTimeline() {
         timeFocus = nil
         topAnchor = nil
+        scrollTarget = nil
         clusterSelection = nil
         clusterLabel = nil
         groupingMode = .all
@@ -571,6 +645,7 @@ final class LibraryViewModel: ObservableObject {
         regionFilter = nil
         timeFocus = nil
         topAnchor = nil
+        scrollTarget = nil
         groupingMode = .months
     }
 
@@ -582,6 +657,7 @@ final class LibraryViewModel: ObservableObject {
         regionFilter = nil
         timeFocus = nil
         topAnchor = nil
+        scrollTarget = nil
         groupingMode = .location
     }
 
@@ -592,6 +668,7 @@ final class LibraryViewModel: ObservableObject {
         clusterLabel = nil
         timeFocus = nil
         topAnchor = nil
+        scrollTarget = nil
         groupingMode = .months
         regionFilter = bounds
     }
@@ -634,19 +711,6 @@ final class LibraryViewModel: ObservableObject {
         let encodable = collapsedGroupIDsByMode.mapValues { Array($0) }
         if let data = try? JSONEncoder().encode(encodable) {
             UserDefaults.standard.set(data, forKey: collapsedGroupDefaultsKey)
-        }
-    }
-
-    private func applyTimeFocus(_ items: [MediaItem], mode: GroupingMode) -> [MediaItem] {
-        guard let focus = timeFocus, mode != .all, mode != .location else { return items }
-        let calendar = Calendar.current
-        return items.filter { item in
-            guard let date = item.creationDate else { return false }
-            let components = calendar.dateComponents([.year, .month, .day], from: date)
-            guard components.year == focus.year else { return false }
-            if let month = focus.month, components.month != month { return false }
-            if let day = focus.day, components.day != day { return false }
-            return true
         }
     }
 

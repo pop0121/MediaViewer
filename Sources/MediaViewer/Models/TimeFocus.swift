@@ -28,8 +28,10 @@ struct TimeAnchor: Equatable, Sendable {
     }
 
     var monthTitle: String? {
-        guard let month else { return nil }
-        return String(format: "%04d-%02d", year, month)
+        guard let month, (1...12).contains(month) else { return nil }
+        let names = ["一月", "二月", "三月", "四月", "五月", "六月",
+                     "七月", "八月", "九月", "十月", "十一月", "十二月"]
+        return names[month - 1]
     }
 }
 
@@ -63,4 +65,11 @@ enum TimeFocusResolver {
         }
         return frames.min(by: { $0.value < $1.value })?.key
     }
+}
+
+/// One landing request for the grid. The token makes repeated requests for the
+/// same section observable, while normal scrolling leaves it untouched.
+struct TimeScrollTarget: Equatable {
+    let groupID: String
+    let token: Int
 }
