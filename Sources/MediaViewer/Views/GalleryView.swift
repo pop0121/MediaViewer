@@ -5,6 +5,7 @@ import SwiftUI
 struct GalleryView: View {
     @StateObject private var viewModel = LibraryViewModel()
     @State private var visibleRegion: MKCoordinateRegion?
+    @AppStorage("gridDensity") private var storedDensity: Double = 1.0
 
     var body: some View {
         Group {
@@ -35,6 +36,7 @@ struct GalleryView: View {
             Text(viewModel.errorMessage ?? "")
         }
         .onAppear {
+            syncDensityFromStorage()
             viewModel.loadStoredRoot()
         }
     }
@@ -244,12 +246,38 @@ struct GalleryView: View {
     }
 
     private var gridCellWidth: CGFloat {
-        max(60, 160 * viewModel.effectiveZoomLevel)
+        max(60, 160 * viewModel.effectiveDensity)
     }
 
     private var thumbnailTier: ThumbnailTier {
         ThumbnailTier.tier(forCellWidth: gridCellWidth,
                            backingScale: NSScreen.main?.backingScaleFactor ?? 2)
+    }
+
+    private var densityBinding: Binding<Double> {
+        Binding(
+            get: { storedDensity },
+            set: { value in
+                setDensity(value)
+            }
+        )
+    }
+
+    private func setDensity(_ value: Double) {
+        let clamped = LibraryViewModel.clampDensity(value)
+        storedDensity = clamped
+        viewModel.setDensity(clamped)
+    }
+
+    /// Move a legacy `zoomLevel` default (0.3...2.0) into `gridDensity`,
+    /// clamped to the new 0.5...2.0 contract.
+    private func syncDensityFromStorage() {
+        let defaults = UserDefaults.standard
+        let migrated = DensityPreferences.storedValue(in: defaults) ?? 1.0
+        storedDensity = migrated
+        if abs(viewModel.gridDensity - storedDensity) > 0.001 {
+            viewModel.setDensity(storedDensity)
+        }
     }
 
     @ViewBuilder
@@ -260,18 +288,53 @@ struct GalleryView: View {
                 set: { viewModel.selectGranularity($0) }
             ))
 
-            HStack(spacing: 6) {
-                Image(systemName: "square.grid.3x3")
+            HStack(spacing: 4) {
                 Text("Small")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
-                Slider(value: $viewModel.zoomLevel, in: 0.3...2.0, step: 0.1)
-                    .frame(width: 150)
-                    .help("Drag right for larger thumbnails")
+                Button {
+                    setDensity(viewModel.gridDensity - 0.1)
+                } label: {
+                    Image(systemName: "minus.magnifyingglass")
+                }
+                .buttonStyle(.borderless)
+                .keyboardShortcut("-", modifiers: .command)
+                .help("Smaller thumbnails (⌘−)")
+
+                Slider(value: densityBinding, in: LibraryViewModel.densityRange, step: 0.1)
+                    .frame(width: 130)
+                    .help("Thumbnail density")
+
+                Button {
+                    setDensity(viewModel.gridDensity + 0.1)
+                } label: {
+                    Image(systemName: "plus.magnifyingglass")
+                }
+                .buttonStyle(.borderless)
+                .keyboardShortcut("+", modifiers: .command)
+                .help("Larger thumbnails (⌘+)")
+
+                Text(String(format: "%.1f×", storedDensity))
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .frame(width: 34, alignment: .leading)
+
+                Menu {
+                    ForEach(Array(LibraryViewModel.densityPresets.enumerated()), id: \.offset) { _, preset in
+                        Button(String(format: "%.1f×", preset)) {
+                            setDensity(preset)
+                        }
+                    }
+                } label: {
+                    Image(systemName: "square.grid.3x3")
+                }
+                .menuStyle(.borderlessButton)
+                .frame(width: 24)
+                .help("Density presets")
+
                 Text("Large")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
-                Image(systemName: "square.grid.2x2")
             }
 
             if viewModel.groupingMode.isMap {

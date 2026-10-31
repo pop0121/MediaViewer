@@ -15,7 +15,7 @@ final class LibraryViewModel: ObservableObject {
     @Published private(set) var clusterLabel: String?
     @Published var lastMapRegion: MKCoordinateRegion?
     @Published var regionFilter: GeoBounds?
-    @Published var zoomLevel: Double = 1.0
+    @Published var gridDensity: Double = 1.0
     @Published var isScanning = false
     @Published var scanProgress: String = ""
     @Published var scanFraction: Double?
@@ -23,7 +23,18 @@ final class LibraryViewModel: ObservableObject {
     @Published var selectedItem: MediaItem?
     @Published var errorMessage: String?
     @Published var totalItemCount: Int = 0
-    @Published private(set) var effectiveZoomLevel: Double = 1.0
+    @Published private(set) var effectiveDensity: Double = 1.0
+
+    static let densityRange: ClosedRange<Double> = 0.5...2.0
+    static let densityPresets: [Double] = [0.5, 0.7, 1.0, 1.4, 2.0]
+    static func clampDensity(_ value: Double) -> Double {
+        min(max(value, densityRange.lowerBound), densityRange.upperBound)
+    }
+    var zoomLevel: Double {
+        get { gridDensity }
+        set { setDensity(newValue) }
+    }
+    var effectiveZoomLevel: Double { effectiveDensity }
     /// Incremented whenever `groupedItems` is recomputed. Used by behavior tests
     /// to prove zoom changes do not regroup.
     private(set) var regroupCount = 0
@@ -40,6 +51,9 @@ final class LibraryViewModel: ObservableObject {
     private var prefetchStartIndex: Int?
     private var prefetchStartTier: ThumbnailTier?
     private var prefetchTier: ThumbnailTier = .grid
+    /// Test/debug switch for measuring first-screen fill with and without the
+    /// look-ahead prefetcher.
+    var prefetchEnabled = true
     private var indexByID: [String: Int] = [:]
     private var locationIndices: [LocationKey: [Int]] = [:]
     private var dateKeyCache: [String: DateKeys] = [:]
@@ -67,9 +81,12 @@ final class LibraryViewModel: ObservableObject {
     init() {
         collapsedGroupIDsByMode = loadCollapsedGroupIDs()
 
-        $zoomLevel
-            .sink { [weak self] zoom in
-                self?.effectiveZoomLevel = zoom
+        $gridDensity
+            .map { Self.clampDensity($0) }
+            .removeDuplicates()
+            .debounce(for: .milliseconds(60), scheduler: RunLoop.main)
+            .sink { [weak self] density in
+                self?.effectiveDensity = density
             }
             .store(in: &cancellables)
 
@@ -333,8 +350,20 @@ final class LibraryViewModel: ObservableObject {
         }
     }
 
+    func setDensity(_ value: Double) {
+        let clamped = Self.clampDensity(value)
+        if gridDensity != clamped {
+            gridDensity = clamped
+        }
+    }
+
+    func adjustDensity(by delta: Double) {
+        setDensity(gridDensity + delta)
+    }
+
     /// Warm the thumbnail cache for items around the visible cell.
     func prefetchThumbnails(around item: MediaItem, tier: ThumbnailTier = .grid) {
+        guard prefetchEnabled else { return }
         guard let index = indexByID[item.id] else { return }
         prefetchAnchor = index
         prefetchTier = tier
