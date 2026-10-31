@@ -12,6 +12,7 @@ struct FullscreenViewerView: View {
     @State private var videoIsPlaying = true
     @State private var eventMonitor: Any?
     @State private var fullImage: NSImage?
+    @State private var placeholderImage: NSImage?
     @State private var isLoadingFullImage = true
 
     private var currentIndex: Int? {
@@ -67,13 +68,19 @@ struct FullscreenViewerView: View {
         .ignoresSafeArea()
         .onAppear {
             installKeyMonitor()
+            Task { await loadPlaceholder() }
             Task { await loadFullImage() }
+            prefetchNeighbors()
         }
         .onChange(of: currentItem?.id) { _ in
             resetZoom()
             fullImage = nil
+            placeholderImage = nil
             isLoadingFullImage = true
+            videoIsPlaying = true
+            Task { await loadPlaceholder() }
             Task { await loadFullImage() }
+            prefetchNeighbors()
         }
         .onDisappear {
             removeKeyMonitor()
@@ -91,6 +98,11 @@ struct FullscreenViewerView: View {
         } else {
             if let image = fullImage {
                 Image(nsImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if let placeholderImage {
+                Image(nsImage: placeholderImage)
                     .resizable()
                     .aspectRatio(contentMode: .fit)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -234,6 +246,44 @@ struct FullscreenViewerView: View {
     }
 
     // MARK: - Helpers
+
+    private func loadPlaceholder() async {
+        guard let item = currentItem, item.isPhoto else { return }
+        let input = ThumbnailInput(
+            relativePath: item.relativePath,
+            modificationDate: item.contentModificationDate,
+            mediaType: item.mediaType
+        )
+        let image = await rootURL.withSecurityScope {
+            await ThumbnailGenerator.shared.thumbnail(for: input, tier: .fullscreen, rootURL: rootURL)
+        }
+        if currentItem?.id == item.id {
+            placeholderImage = image?.image
+        }
+    }
+
+    /// Warm the 1024 px placeholders for the previous/next items.
+    private func prefetchNeighbors() {
+        guard let index = currentIndex, !viewModel.items.isEmpty else { return }
+        let lower = max(0, index - 2)
+        let upper = min(viewModel.items.count, index + 3)
+        let inputs = viewModel.items[lower..<upper].map {
+            ThumbnailInput(
+                relativePath: $0.relativePath,
+                modificationDate: $0.contentModificationDate,
+                mediaType: $0.mediaType
+            )
+        }
+        let root = rootURL
+        Task.detached(priority: .utility) {
+            for input in inputs {
+                if Task.isCancelled { return }
+                _ = await root.withSecurityScope {
+                    await ThumbnailGenerator.shared.thumbnail(for: input, tier: .fullscreen, rootURL: root)
+                }
+            }
+        }
+    }
 
     private func loadFullImage() async {
         guard let item = currentItem, item.isPhoto else {

@@ -4,127 +4,153 @@ import CryptoKit
 import Foundation
 import ImageIO
 
-struct ThumbnailInput {
+/// An already-decoded image handed across concurrency domains. The wrapped
+/// `NSImage` is created from an immutable `CGImage` and is never mutated.
+struct ThumbnailImage: @unchecked Sendable {
+    let image: NSImage
+}
+
+struct ThumbnailInput: Sendable {
     let relativePath: String
     let modificationDate: Date
     let mediaType: MediaItem.MediaType
 }
 
-final class ThumbnailGenerator {
+enum ThumbnailTier: String, Sendable {
+    /// Grid cells are 60–160 pt wide, so 320 px covers 2× Retina at max zoom.
+    case grid
+    /// Placeholder for the full-screen viewer, replaced by the original image.
+    case fullscreen
+
+    var maxPixelSize: Int {
+        switch self {
+        case .grid: return 320
+        case .fullscreen: return 1024
+        }
+    }
+
+    var jpegQuality: CGFloat {
+        switch self {
+        case .grid: return 0.8
+        case .fullscreen: return 0.85
+        }
+    }
+}
+
+final class ThumbnailGenerator: @unchecked Sendable {
     static let shared = ThumbnailGenerator()
 
-    private let memoryCache = NSCache<NSString, NSImage>()
-    private let thumbnailSize: CGFloat = 480
+    private let gridCache = NSCache<NSString, NSImage>()
+    private let fullscreenCache = NSCache<NSString, NSImage>()
 
     init() {
-        // Cap in-memory cache so huge libraries don't exhaust RAM.
-        memoryCache.countLimit = 200
-        memoryCache.totalCostLimit = 200 * 1024 * 1024 // 200 MB
+        // 320 px bitmaps are ~0.3 MB decoded: 256 MB ≈ 850 images.
+        gridCache.countLimit = 2_000
+        gridCache.totalCostLimit = 256 * 1024 * 1024
+        // 1024 px placeholders are ~3 MB decoded: 128 MB ≈ 42 images.
+        fullscreenCache.countLimit = 64
+        fullscreenCache.totalCostLimit = 128 * 1024 * 1024
     }
 
     /// Return a cached thumbnail if available; otherwise generate and cache it.
-    func thumbnail(for item: MediaItemEntity, rootURL: URL) async -> NSImage? {
-        let input = ThumbnailInput(
-            relativePath: item.relativePath,
-            modificationDate: item.contentModificationDate,
-            mediaType: item.mediaType
-        )
-        return await thumbnail(for: input, rootURL: rootURL)
-    }
-
-    /// Return a cached thumbnail for a lightweight `MediaItem`.
-    func thumbnail(for item: MediaItem, rootURL: URL) async -> NSImage? {
-        let input = ThumbnailInput(
-            relativePath: item.relativePath,
-            modificationDate: item.contentModificationDate,
-            mediaType: item.mediaType
-        )
-        return await thumbnail(for: input, rootURL: rootURL)
-    }
-
-    func thumbnail(for input: ThumbnailInput, rootURL: URL) async -> NSImage? {
-        guard let thumbnailURL = thumbnailURL(for: input, rootURL: rootURL) else { return nil }
+    func thumbnail(
+        for input: ThumbnailInput,
+        tier: ThumbnailTier = .grid,
+        rootURL: URL
+    ) async -> ThumbnailImage? {
+        guard let thumbnailURL = thumbnailURL(for: input, tier: tier, rootURL: rootURL) else { return nil }
 
         let key = thumbnailURL.path as NSString
-        if let cached = memoryCache.object(forKey: key) {
-            return cached
+        if let cached = cache(for: tier).object(forKey: key) {
+            return ThumbnailImage(image: cached)
         }
 
         if FileManager.default.fileExists(atPath: thumbnailURL.path) {
-            if let image = NSImage(contentsOf: thumbnailURL) {
-                memoryCache.setObject(image, forKey: key, cost: image.cost)
-                return image
+            if let image = loadDecodedThumbnail(at: thumbnailURL, tier: tier) {
+                cache(for: tier).setObject(image, forKey: key, cost: image.cost)
+                return ThumbnailImage(image: image)
             }
         }
 
         let sourceURL = rootURL.appendingPathComponent(input.relativePath)
         guard FileManager.default.fileExists(atPath: sourceURL.path) else { return nil }
 
-        let image = await generateThumbnail(for: input, sourceURL: sourceURL)
+        let image = await generateThumbnail(for: input, tier: tier, sourceURL: sourceURL)
         if let image {
-            try? saveThumbnail(image, to: thumbnailURL)
-            memoryCache.setObject(image, forKey: key, cost: image.cost)
+            try? saveThumbnail(image, to: thumbnailURL, quality: tier.jpegQuality)
+            cache(for: tier).setObject(image, forKey: key, cost: image.cost)
         }
-        return image
+        return image.map(ThumbnailImage.init(image:))
     }
 
-    /// Generate thumbnails for many items concurrently, bounded by `maxConcurrent`.
-    func generateThumbnails(
-        for inputs: [ThumbnailInput],
-        rootURL: URL,
-        maxConcurrent: Int = 8
-    ) async {
-        guard !inputs.isEmpty else { return }
-
-        let chunks = inputs.chunked(into: maxConcurrent)
-        for chunk in chunks {
-            await withTaskGroup(of: Void.self) { group in
-                for input in chunk {
-                    group.addTask {
-                        _ = await self.thumbnail(for: input, rootURL: rootURL)
-                    }
-                }
-                await group.waitForAll()
-            }
+    /// Remove every tier for a deleted/changed item.
+    func removeThumbnails(for input: ThumbnailInput, rootURL: URL) {
+        for tier in [ThumbnailTier.grid, .fullscreen] {
+            guard let url = thumbnailURL(for: input, tier: tier, rootURL: rootURL) else { continue }
+            try? FileManager.default.removeItem(at: url)
         }
-    }
-
-    /// Clear any existing thumbnail for an item so it will be regenerated.
-    func invalidateThumbnail(for input: ThumbnailInput, rootURL: URL) {
-        guard let url = thumbnailURL(for: input, rootURL: rootURL) else { return }
-        try? FileManager.default.removeItem(at: url)
     }
 
     /// Remove orphaned thumbnails that no longer correspond to an indexed item.
     func purgeOrphanedThumbnails(rootURL: URL, validInputs: [ThumbnailInput]) async {
-        let validPaths = Set(validInputs.compactMap { thumbnailURL(for: $0, rootURL: rootURL)?.path })
+        var validPaths = Set<String>()
+        validPaths.reserveCapacity(validInputs.count * 2)
+        for input in validInputs {
+            for tier in [ThumbnailTier.grid, .fullscreen] {
+                if let url = thumbnailURL(for: input, tier: tier, rootURL: rootURL) {
+                    validPaths.insert(url.path)
+                }
+            }
+        }
+
         let thumbsDir = PersistenceController.thumbnailsDirectory(for: rootURL)
         guard let files = try? FileManager.default.contentsOfDirectory(at: thumbsDir,
                                                                         includingPropertiesForKeys: nil) else {
             return
         }
-        for file in files {
-            if !validPaths.contains(file.path) {
-                try? FileManager.default.removeItem(at: file)
-            }
+        for file in files where !validPaths.contains(file.path) {
+            try? FileManager.default.removeItem(at: file)
         }
     }
 
     // MARK: - Internal
 
-    func thumbnailURL(for input: ThumbnailInput, rootURL: URL) -> URL? {
+    func thumbnailURL(for input: ThumbnailInput, tier: ThumbnailTier = .grid, rootURL: URL) -> URL? {
         let thumbsDir = PersistenceController.thumbnailsDirectory(for: rootURL)
         let hash = stableHash("\(input.relativePath)|\(input.modificationDate.timeIntervalSince1970)")
-        return thumbsDir.appendingPathComponent("\(hash).jpg")
+        return thumbsDir.appendingPathComponent("\(hash)-\(tier.rawValue).jpg")
     }
 
     // MARK: - Private
 
-    private func generateThumbnail(for input: ThumbnailInput, sourceURL: URL) async -> NSImage? {
+    private func cache(for tier: ThumbnailTier) -> NSCache<NSString, NSImage> {
+        switch tier {
+        case .grid: return gridCache
+        case .fullscreen: return fullscreenCache
+        }
+    }
+
+    /// Decode a cached JPEG off the caller's thread and return an already-decoded image.
+    private func loadDecodedThumbnail(at url: URL, tier: ThumbnailTier) -> NSImage? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        let options: [NSString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceShouldCache: false,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: tier.maxPixelSize
+        ]
+        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
+            return nil
+        }
+        return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+    }
+
+    private func generateThumbnail(for input: ThumbnailInput, tier: ThumbnailTier, sourceURL: URL) async -> NSImage? {
         if input.mediaType == .photo {
-            return await generatePhotoThumbnail(from: sourceURL)
+            return generatePhotoThumbnail(from: sourceURL, tier: tier)
         } else {
-            return await generateVideoThumbnail(from: sourceURL)
+            return await generateVideoThumbnail(from: sourceURL, tier: tier)
         }
     }
 
@@ -134,15 +160,22 @@ final class ThumbnailGenerator {
         return digest.compactMap { String(format: "%02x", $0) }.joined()
     }
 
-    private func generatePhotoThumbnail(from url: URL) async -> NSImage? {
+    private func generatePhotoThumbnail(from url: URL, tier: ThumbnailTier) -> NSImage? {
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
 
-        let options: [NSString: Any] = [
-            kCGImageSourceCreateThumbnailFromImageAlways: true,
+        // Grid thumbnails use the embedded EXIF thumbnail when present (fast);
+        // full-screen placeholders always downsample the full image.
+        var options: [NSString: Any] = [
             kCGImageSourceShouldCache: false,
+            kCGImageSourceShouldCacheImmediately: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: max(thumbnailSize, thumbnailSize) * 2
+            kCGImageSourceThumbnailMaxPixelSize: tier.maxPixelSize
         ]
+        if tier == .grid {
+            options[kCGImageSourceCreateThumbnailFromImageIfAbsent] = true
+        } else {
+            options[kCGImageSourceCreateThumbnailFromImageAlways] = true
+        }
 
         guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
             return nil
@@ -150,16 +183,16 @@ final class ThumbnailGenerator {
         return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
     }
 
-    private func generateVideoThumbnail(from url: URL) async -> NSImage? {
+    private func generateVideoThumbnail(from url: URL, tier: ThumbnailTier) async -> NSImage? {
         let asset = AVAsset(url: url)
         let generator = AVAssetImageGenerator(asset: asset)
         generator.appliesPreferredTrackTransform = true
-        generator.maximumSize = CGSize(width: thumbnailSize * 2, height: thumbnailSize * 2)
+        generator.maximumSize = CGSize(width: tier.maxPixelSize, height: tier.maxPixelSize)
 
         do {
             let duration = try await asset.load(.duration)
             let time = CMTime(seconds: duration.seconds * 0.5, preferredTimescale: 600)
-            let cgImage = try generator.copyCGImage(at: time, actualTime: nil)
+            let (cgImage, _) = try await generator.image(at: time)
             return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
         } catch {
             print("Failed to generate video thumbnail for \(url): \(error.localizedDescription)")
@@ -167,11 +200,11 @@ final class ThumbnailGenerator {
         }
     }
 
-    private func saveThumbnail(_ image: NSImage, to url: URL) throws {
+    private func saveThumbnail(_ image: NSImage, to url: URL, quality: CGFloat) throws {
         guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return }
         let rep = NSBitmapImageRep(cgImage: cgImage)
         rep.size = image.size
-        guard let data = rep.representation(using: .jpeg, properties: [.compressionFactor: 0.85]) else { return }
+        guard let data = rep.representation(using: .jpeg, properties: [.compressionFactor: quality]) else { return }
         try data.write(to: url)
     }
 }

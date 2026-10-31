@@ -57,10 +57,10 @@ struct MediaCellView: View {
         )
 
         let image = await rootURL.withSecurityScope {
-            await ThumbnailGenerator.shared.thumbnail(for: input, rootURL: rootURL)
+            await ThumbnailGenerator.shared.thumbnail(for: input, tier: .grid, rootURL: rootURL)
         }
 
-        self.thumbnail = image
+        self.thumbnail = image?.image
         self.isLoading = false
     }
 }

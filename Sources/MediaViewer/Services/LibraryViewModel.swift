@@ -223,7 +223,7 @@ final class LibraryViewModel: ObservableObject {
         prefetchTask = Task.detached(priority: .utility) {
             for input in inputs {
                 if Task.isCancelled { return }
-                _ = await ThumbnailGenerator.shared.thumbnail(for: input, rootURL: rootURL)
+                _ = await ThumbnailGenerator.shared.thumbnail(for: input, tier: .grid, rootURL: rootURL)
             }
         }
     }

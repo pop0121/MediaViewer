@@ -125,9 +125,7 @@ final class MediaScanner {
                         modificationDate: entity.contentModificationDate,
                         mediaType: entity.mediaType
                     )
-                    if let thumbURL = thumbnailGenerator.thumbnailURL(for: input, rootURL: rootURL) {
-                        try? fileManager.removeItem(at: thumbURL)
-                    }
+                    thumbnailGenerator.removeThumbnails(for: input, rootURL: rootURL)
                     self.context.delete(entity)
                 }
             }
