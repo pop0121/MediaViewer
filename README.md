@@ -7,8 +7,11 @@ A native macOS app for browsing photos and videos stored in a user-selected root
 - Choose a root folder on launch (stored with a security-scoped bookmark for relaunch).
 - Recursively scans for `.jpg`, `.jpeg`, `.mp4`, and `.mov` files.
 - Extracts creation date and GPS location metadata from EXIF and QuickTime metadata.
-- Displays media in a zoomable grid with pinned date/location section headers.
-- Groups items by date (year / month / day, adapting to zoom level) or by location.
+- Displays media in a zoomable grid with pinned date section headers.
+- Time grouping is explicit: All / Years / Months / Days (default Months);
+  zoom only changes thumbnail size.
+- Places mode shows a MapKit map with local clustering, badges, tap-to-zoom,
+  and a "Show Grid in This Area" action.
 - Shows determinate scan progress and allows cancelling; partial results are kept.
 - Click an item to open a full-window overlay viewer with animated transitions.
 - Navigate with arrow keys, close with `Esc`, toggle video play/pause with `Space`.
@@ -68,11 +71,14 @@ swift run MediaViewer
 
 ## Use
 
-- Use the **Group By** segmented control to switch between no grouping, date grouping, and location grouping.
-- Drag the zoom slider to change grid cell size. Date grouping adapts:
-  - Zoom > 1.2 → by day
-  - Zoom 0.7–1.2 → by month
-  - Zoom < 0.7 → by year
+- Use the **All / Years / Months / Days / Places** segmented control to choose
+  the time sections or the map. Date granularity never changes with zoom.
+- Drag the thumbnail slider from **Small** (left) to **Large** (right); it only
+  changes cell size (and therefore the 320/640px thumbnail tier).
+- In Places, pinch/scroll the map to recluster locally; tap a numeric cluster
+  to zoom in, tap a single photo to open it, or use **Show Grid in This Area**
+  to filter the grid to the current map bounds. Photos without GPS are counted
+  in the toolbar and omitted from the map.
 - Click any thumbnail to open it in the full-window viewer.
 - In the viewer:
   - `←` / `↑` → previous item
@@ -113,8 +119,8 @@ either backend falls back to the other on failure. No key is committed.
   string included in the Nominatim User-Agent. Nominatim requests are throttled
   to 1/s and results are cached.
 
-Location grouping shows the required “© OpenStreetMap contributors (ODbL)”
-attribution.
+Location names display the required “© OpenStreetMap contributors (ODbL)”
+attribution; map tiles are provided by MapKit (no external key).
 
 ## Debugging
 
@@ -132,6 +138,8 @@ MEDIAVIEWER_TIMING=1 swift run MediaViewer
 
 - The app keeps all indexed `MediaItem` values in memory. Very large libraries (>100k items) may need paging or a fetched-results controller.
 - The grid is published incrementally during indexing, but full-library scans still take longer on slow volumes.
+- Places clusters the visible region locally to roughly 20–60 badges; a very sparse region can show fewer.
+- Pinch-to-zoom inside the photo viewer does not reset between items (unchanged from earlier batches).
 - The 2000px screen decode of a 22MP JPEG takes roughly 200–300ms on the test machine; the 1024px placeholder is visible immediately.
 - 640px/1024px tiers are generated on demand, so browsing zoomed out over a large library costs extra disk space (about 75KB per 640px image).
 - Reverse geocoding is throttled to 1 request/s and runs as a background, cancellable pass after scanning; failed lookups are retried on the next scan.
