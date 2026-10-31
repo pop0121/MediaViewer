@@ -51,9 +51,9 @@ swift test
 
 - Loads the previously chosen root folder from `BookmarkStore` on launch.
 - Creates a `PersistenceController` whose SQLite store lives inside a hidden `.mediaviewer/Store/` directory under the chosen root.
-- Runs `MediaScanner` to reconcile the filesystem with the Core Data index.
-- Fetches items in batches of 1,000 from Core Data into lightweight `MediaItem` structs.
-- Groups items reactively based on `groupingMode` and `zoomLevel`.
+- Runs `MediaScanner` to reconcile the filesystem with the Core Data index, reporting enumerating/indexing/saving progress and honouring task cancellation.
+- Fetches items in batches of 1,000 from Core Data into lightweight `MediaItem` structs as soon as the index is ready; thumbnail cleanup and reverse geocoding run afterwards in a cancellable maintenance task.
+- Groups items reactively based on `groupingMode` and `zoomLevel`; date keys are computed once per item and cached so zoom/collapse/paging only re-bucket.
 
 ### Filesystem Access
 
@@ -76,13 +76,17 @@ The SQLite store and JPEG thumbnails are stored under `<root>/.mediaviewer/Store
 2. Compares each file's modification date against the Core Data index to find new/changed files.
 3. Extracts metadata concurrently (bounded to 8 tasks) via `MetadataExtractor`.
 4. Applies updates and deletes stale index entries in one background context save.
-5. Triggers thumbnail generation for changed files and purges orphaned thumbnails.
+5. Returns the number of processed and actually removed entries; thumbnail cleanup happens outside the scan.
+
+`scan(rootURL:progress:)` takes a `@Sendable (ScanProgress)` callback (phases: enumerating, indexing, saving) and checks `Task.checkCancellation()` between enumeration and metadata chunks.
 
 `MetadataExtractor` uses ImageIO/EXIF for photos and AVFoundation for videos. Video location metadata is parsed from QuickTime ISO 6709 strings.
 
 ### Thumbnails
 
-`ThumbnailGenerator` keeps an in-memory `NSCache` capped at 200 images/200 MB and writes JPEG thumbnails to disk using a stable hash of relative path and modification date. Photos use `CGImageSourceCreateThumbnailAtIndex`; videos use `AVAssetImageGenerator` at the midpoint.
+`ThumbnailGenerator` serves two tiers: `.grid` (320px, prefers the embedded EXIF thumbnail) and `.fullscreen` (1024px placeholder). Each tier has its own `NSCache` (256MB grid ≈ 850 images, 128MB fullscreen ≈ 42) and its own JPEG on disk, keyed by relative path, modification date and tier. Decoding happens inside the generator with `kCGImageSourceShouldCacheImmediately`, so callers only bind already-decoded images.
+
+Concurrent requests for the same path are coalesced into one detached task; a cancelled caller does not cancel that shared work. Photos use `CGImageSourceCreateThumbnailAtIndex`; videos use `AVAssetImageGenerator` at the midpoint.
 
 ### Geocoding
 
@@ -90,7 +94,13 @@ The SQLite store and JPEG thumbnails are stored under `<root>/.mediaviewer/Store
 
 ### Viewer
 
-`FullscreenViewerView` overlays the grid and supports arrow-key navigation, Escape to close, and Space to play/pause video. Photos load full-size `NSImage` and support pinch zoom and drag pan; videos use `VideoPlayerView` (an `NSViewRepresentable` wrapping `AVPlayerView`) and autoplay muted.
+`FullscreenViewerView` overlays the grid and supports arrow-key navigation, Escape to close, and Space to play/pause video. Key events are handled synchronously on the main actor. Photos show the 1024px placeholder immediately while the full-resolution image is decoded off the main thread with ImageIO (EXIF orientation applied); ±2 neighbour placeholders are prefetched. Videos use `VideoPlayerView` (an `NSViewRepresentable` wrapping `AVPlayerView`), autoplay muted, and replace their `AVPlayerItem` when the selected media changes.
+
+`GalleryView` uses `LazyVGrid` with pinned section headers; the viewer opens/closes with a combined opacity/scale transition.
+
+### Observability
+
+Diagnostics use `os.Logger` categories under subsystem `com.example.MediaViewer` (`Log`). `Perf` always emits Instruments signposts; set `MEDIAVIEWER_TIMING=1` to also log readable durations.
 
 ## Distribution Notes
 

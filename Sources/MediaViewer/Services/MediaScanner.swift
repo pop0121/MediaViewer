@@ -171,7 +171,7 @@ final class MediaScanner {
 
         // Process in sliding windows to bound memory and AVAsset concurrency.
         let chunks = files.chunked(into: limit)
-        for chunk in chunks {
+        for (chunkIndex, chunk) in chunks.enumerated() {
             try Task.checkCancellation()
             let chunkResults = await withTaskGroup(of: (FileToIndex, ExtractedMetadata).self) { group in
                 for file in chunk {
@@ -187,7 +187,10 @@ final class MediaScanner {
                 return collected
             }
             results.append(contentsOf: chunkResults)
-            await progress?(ScanProgress(phase: .indexing, completed: results.count, total: files.count))
+            // Throttle UI hops: main-actor callbacks every ~64 files.
+            if chunkIndex % 8 == 0 || chunkIndex == chunks.count - 1 {
+                await progress?(ScanProgress(phase: .indexing, completed: results.count, total: files.count))
+            }
         }
 
         return results

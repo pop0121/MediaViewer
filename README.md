@@ -7,12 +7,16 @@ A native macOS app for browsing photos and videos stored in a user-selected root
 - Choose a root folder on launch (stored with a security-scoped bookmark for relaunch).
 - Recursively scans for `.jpg`, `.jpeg`, `.mp4`, and `.mov` files.
 - Extracts creation date and GPS location metadata from EXIF and QuickTime metadata.
-- Displays media in a zoomable grid.
+- Displays media in a zoomable grid with pinned date/location section headers.
 - Groups items by date (year / month / day, adapting to zoom level) or by location.
-- Click an item to open a full-window overlay viewer.
+- Shows determinate scan progress and allows cancelling; partial results are kept.
+- Click an item to open a full-window overlay viewer with animated transitions.
 - Navigate with arrow keys, close with `Esc`, toggle video play/pause with `Space`.
-- Videos autoplay muted in the viewer.
-- Generates and caches thumbnails and a metadata index in a hidden `.mediaviewer/` folder under the root path.
+- Videos autoplay muted in the viewer; switching media replaces the player item.
+- Grid and full-screen images are decoded off the main thread; the viewer shows a
+  1024px placeholder while the full-resolution image decodes.
+- Generates and caches tiered thumbnails (320px grid, 1024px full-screen) and a
+  metadata index in a hidden `.mediaviewer/` folder under the root path.
 - Media files are never modified.
 
 ## Requirements
@@ -94,9 +98,24 @@ When wrapping this SPM package into an `.app` bundle for distribution, apply the
 
 The app already creates and resolves security-scoped bookmarks for the chosen root folder.
 
+## Debugging
+
+All diagnostics go through `os.Logger` (subsystems `com.example.MediaViewer`).
+Set `MEDIAVIEWER_TIMING=1` to also log wall-clock timings for scans, first-screen
+fetch, maintenance and per-phase durations; Instruments always receives the
+corresponding signposts.
+
+```bash
+log stream --predicate 'subsystem == "com.example.MediaViewer"'
+MEDIAVIEWER_TIMING=1 swift run MediaViewer
+```
+
 ## Known Limitations / TODO
 
 - The app keeps all indexed `MediaItem` values in memory. Very large libraries (>100k items) may need paging or a fetched-results controller.
+- The first screen appears after the index pass finishes; changes are not published incrementally during indexing.
+- The grid always requests the 320px tier. At zoom levels that make cells larger than 160pt on Retina, images are upscaled.
+- Full-resolution photos are decoded whole (up to ~84MB for a 22MP JPEG) on a background thread; the viewer shows the 1024px placeholder until decoded.
 - Reverse geocoding is throttled by `CLGeocoder`; large batches may take time and are done in a background pass after scanning.
 - Video location metadata parsing is best-effort for common QuickTime ISO 6709 strings.
-- Pinch-to-zoom in the photo viewer does not reset when navigating to the next item except by closing/reopening the item.
+- Only `.jpg`, `.jpeg`, `.mp4`, and `.mov` are indexed (no HEIC/PNG/Live Photo).
