@@ -44,9 +44,13 @@ struct MediaCellView: View {
             .clipShape(RoundedRectangle(cornerRadius: 6))
         }
         .aspectRatio(1, contentMode: .fit)
-        .task(id: item.id) {
+        .task(id: taskID) {
             await loadThumbnail()
         }
+    }
+
+    private var taskID: String {
+        "\(item.id)|\(item.contentModificationDate.timeIntervalSince1970)"
     }
 
     private func loadThumbnail() async {
@@ -60,6 +64,7 @@ struct MediaCellView: View {
             await ThumbnailGenerator.shared.thumbnail(for: input, tier: .grid, rootURL: rootURL)
         }
 
+        guard !Task.isCancelled else { return }
         self.thumbnail = image?.image
         self.isLoading = false
     }

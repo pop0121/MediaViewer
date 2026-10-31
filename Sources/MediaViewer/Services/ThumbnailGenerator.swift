@@ -42,6 +42,8 @@ final class ThumbnailGenerator: @unchecked Sendable {
 
     private let gridCache = NSCache<NSString, NSImage>()
     private let fullscreenCache = NSCache<NSString, NSImage>()
+    private let stateLock = NSLock()
+    private var inFlight: [String: Task<ThumbnailImage?, Never>] = [:]
 
     init() {
         // 320 px bitmaps are ~0.3 MB decoded: 256 MB ≈ 850 images.
@@ -53,6 +55,7 @@ final class ThumbnailGenerator: @unchecked Sendable {
     }
 
     /// Return a cached thumbnail if available; otherwise generate and cache it.
+    /// Concurrent requests for the same item share one decoding task.
     func thumbnail(
         for input: ThumbnailInput,
         tier: ThumbnailTier = .grid,
@@ -60,14 +63,57 @@ final class ThumbnailGenerator: @unchecked Sendable {
     ) async -> ThumbnailImage? {
         guard let thumbnailURL = thumbnailURL(for: input, tier: tier, rootURL: rootURL) else { return nil }
 
-        let key = thumbnailURL.path as NSString
-        if let cached = cache(for: tier).object(forKey: key) {
+        let cacheKey = thumbnailURL.path as NSString
+        if let cached = cache(for: tier).object(forKey: cacheKey) {
+            return ThumbnailImage(image: cached)
+        }
+
+        let path = thumbnailURL.path
+        if let existing = inFlightTask(for: path) {
+            return await existing.value
+        }
+        let task = Task.detached(priority: .userInitiated) { [self] in
+            await loadOrGenerate(input: input, tier: tier, rootURL: rootURL, thumbnailURL: thumbnailURL)
+        }
+        setInFlightTask(task, for: path)
+
+        let result = await task.value
+        clearInFlightTask(for: path)
+        return result
+    }
+
+    private func inFlightTask(for path: String) -> Task<ThumbnailImage?, Never>? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return inFlight[path]
+    }
+
+    private func setInFlightTask(_ task: Task<ThumbnailImage?, Never>, for path: String) {
+        stateLock.lock()
+        inFlight[path] = task
+        stateLock.unlock()
+    }
+
+    private func clearInFlightTask(for path: String) {
+        stateLock.lock()
+        inFlight.removeValue(forKey: path)
+        stateLock.unlock()
+    }
+
+    private func loadOrGenerate(
+        input: ThumbnailInput,
+        tier: ThumbnailTier,
+        rootURL: URL,
+        thumbnailURL: URL
+    ) async -> ThumbnailImage? {
+        let cacheKey = thumbnailURL.path as NSString
+        if let cached = cache(for: tier).object(forKey: cacheKey) {
             return ThumbnailImage(image: cached)
         }
 
         if FileManager.default.fileExists(atPath: thumbnailURL.path) {
             if let image = loadDecodedThumbnail(at: thumbnailURL, tier: tier) {
-                cache(for: tier).setObject(image, forKey: key, cost: image.cost)
+                cache(for: tier).setObject(image, forKey: cacheKey, cost: image.cost)
                 return ThumbnailImage(image: image)
             }
         }
@@ -78,7 +124,7 @@ final class ThumbnailGenerator: @unchecked Sendable {
         let image = await generateThumbnail(for: input, tier: tier, sourceURL: sourceURL)
         if let image {
             try? saveThumbnail(image, to: thumbnailURL, quality: tier.jpegQuality)
-            cache(for: tier).setObject(image, forKey: key, cost: image.cost)
+            cache(for: tier).setObject(image, forKey: cacheKey, cost: image.cost)
         }
         return image.map(ThumbnailImage.init(image:))
     }
