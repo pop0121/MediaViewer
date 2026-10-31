@@ -1,8 +1,10 @@
 import AppKit
+import MapKit
 import SwiftUI
 
 struct GalleryView: View {
     @StateObject private var viewModel = LibraryViewModel()
+    @State private var visibleRegion: MKCoordinateRegion?
 
     var body: some View {
         Group {
@@ -79,82 +81,139 @@ struct GalleryView: View {
                         .multilineTextAlignment(.center)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if viewModel.groupingMode.isMap {
+                mapContent(rootURL: rootURL)
             } else {
-                ScrollView {
-                    LazyVGrid(
-                        columns: gridColumns,
-                        spacing: 8,
-                        pinnedViews: [.sectionHeaders]
-                    ) {
-                        ForEach(viewModel.groupedItems) { group in
-                            Section {
-                                if !group.isCollapsed {
-                                    ForEach(group.items) { item in
-                                        MediaCellView(
-                                            item: item,
-                                            rootURL: rootURL,
-                                            isScrollingFast: viewModel.isFastScrolling,
-                                            tier: thumbnailTier
-                                        )
-                                        .contentShape(Rectangle())
-                                        .onTapGesture {
-                                            withAnimation(.easeOut(duration: 0.18)) {
-                                                viewModel.selectedItem = item
-                                            }
-                                        }
-                                        .onAppear {
-                                            viewModel.prefetchThumbnails(around: item, tier: thumbnailTier)
-                                        }
-                                    }
-                                }
-                            } header: {
-                                Button {
-                                    viewModel.toggleCollapsed(for: group)
-                                } label: {
-                                    HStack {
-                                        Image(systemName: group.isCollapsed ? "chevron.right" : "chevron.down")
-                                            .font(.caption)
-                                            .foregroundStyle(.secondary)
-                                        Text(group.title)
-                                            .font(.headline)
-                                        Spacer()
-                                        Text("\(group.count) items")
-                                            .font(.caption)
-                                            .foregroundStyle(.secondary)
-                                    }
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 4)
-                                }
-                                .buttonStyle(.plain)
-                                .background(Color(nsColor: .controlBackgroundColor))
-                            }
-                        }
-                    }
-                    .padding(8)
-                    .background(
-                        ScrollActivityObserver { fast in
-                            viewModel.setFastScrolling(fast)
-                        }
-                    )
-
-                    if viewModel.canLoadMore {
-                        ProgressView()
-                            .progressViewStyle(.circular)
-                            .frame(maxWidth: .infinity, minHeight: 60)
-                            .task(id: "\(viewModel.items.count)-\(viewModel.isFastScrolling)") {
-                                await viewModel.loadMoreItems()
-                            }
-                    }
-                }
+                gridContent(rootURL: rootURL)
             }
 
             if viewModel.groupingMode == .location {
-                Text("Location data © OpenStreetMap contributors (ODbL)")
+                Text("Location names © OpenStreetMap contributors (ODbL)")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .trailing)
                     .padding(.horizontal, 12)
                     .padding(.bottom, 4)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func gridContent(rootURL: URL) -> some View {
+        ScrollView {
+            LazyVGrid(
+                columns: gridColumns,
+                spacing: 8,
+                pinnedViews: [.sectionHeaders]
+            ) {
+                ForEach(viewModel.groupedItems) { group in
+                    Section {
+                        if !group.isCollapsed {
+                            ForEach(group.items) { item in
+                                MediaCellView(
+                                    item: item,
+                                    rootURL: rootURL,
+                                    isScrollingFast: viewModel.isFastScrolling,
+                                    tier: thumbnailTier
+                                )
+                                .contentShape(Rectangle())
+                                .onTapGesture {
+                                    withAnimation(.easeOut(duration: 0.18)) {
+                                        viewModel.selectedItem = item
+                                    }
+                                }
+                                .onAppear {
+                                    viewModel.prefetchThumbnails(around: item, tier: thumbnailTier)
+                                }
+                            }
+                        }
+                    } header: {
+                        Button {
+                            viewModel.toggleCollapsed(for: group)
+                        } label: {
+                            HStack {
+                                Image(systemName: group.isCollapsed ? "chevron.right" : "chevron.down")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Text(group.title)
+                                    .font(.headline)
+                                Spacer()
+                                Text("\(group.count) items")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                        }
+                        .buttonStyle(.plain)
+                        .background(Color(nsColor: .controlBackgroundColor))
+                    }
+                }
+            }
+            .padding(8)
+            .background(
+                ScrollActivityObserver { fast in
+                    viewModel.setFastScrolling(fast)
+                }
+            )
+
+            if viewModel.canLoadMore {
+                ProgressView()
+                    .progressViewStyle(.circular)
+                    .frame(maxWidth: .infinity, minHeight: 60)
+                    .task(id: "\(viewModel.items.count)-\(viewModel.isFastScrolling)") {
+                        await viewModel.loadMoreItems()
+                    }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func mapContent(rootURL: URL) -> some View {
+        ZStack(alignment: .topLeading) {
+            PlacesMapView(
+                items: viewModel.items,
+                onOpen: { item in
+                    withAnimation(.easeOut(duration: 0.18)) {
+                        viewModel.selectedItem = item
+                    }
+                },
+                onRegionChange: { visibleRegion = $0 }
+            )
+
+            VStack(alignment: .leading, spacing: 8) {
+                if let region = visibleRegion {
+                    Button {
+                        viewModel.showGrid(in: region)
+                    } label: {
+                        Label("Show Grid in This Area", systemImage: "square.grid.2x2")
+                    }
+                    .controlSize(.small)
+                }
+                if viewModel.itemsWithoutLocationCount > 0 {
+                    Text("\(viewModel.itemsWithoutLocationCount) without location")
+                        .font(.caption)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(.ultraThinMaterial)
+                        .clipShape(Capsule())
+                }
+            }
+            .padding(12)
+
+            if viewModel.items.allSatisfy({ $0.coordinate == nil }) {
+                Text("No photos with location information")
+                    .font(.headline)
+                    .padding()
+                    .background(.ultraThinMaterial)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .allowsHitTesting(false)
+            }
+        }
+        .task(id: viewModel.isScanning) {
+            if !viewModel.isScanning {
+                await viewModel.loadAllItems()
             }
         }
     }
@@ -191,6 +250,21 @@ struct GalleryView: View {
                 Image(systemName: "square.grid.2x2")
             }
 
+            if viewModel.groupingMode.isMap {
+                Text("\(viewModel.itemsWithoutLocationCount) without location")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if viewModel.regionFilter != nil {
+                Button {
+                    viewModel.clearRegionFilter()
+                } label: {
+                    Label("Clear Map Area", systemImage: "xmark.circle")
+                }
+                .controlSize(.small)
+            }
+
             Spacer()
 
             Text("\(viewModel.items.count) items")
@@ -214,5 +288,10 @@ struct GalleryView: View {
         }
         .padding()
         .background(Color(nsColor: .controlBackgroundColor))
+        .onChange(of: viewModel.groupingMode) { mode in
+            if mode.isMap {
+                viewModel.clearRegionFilter()
+            }
+        }
     }
 }

@@ -1,6 +1,7 @@
 import Combine
 import CoreData
 import Foundation
+import MapKit
 import SwiftUI
 
 @MainActor
@@ -9,6 +10,7 @@ final class LibraryViewModel: ObservableObject {
     @Published var items: [MediaItem] = []
     @Published var groupedItems: [MediaGroup] = []
     @Published var groupingMode: GroupingMode = .months
+    @Published var regionFilter: GeoBounds?
     @Published var zoomLevel: Double = 1.0
     @Published var isScanning = false
     @Published var scanProgress: String = ""
@@ -45,6 +47,16 @@ final class LibraryViewModel: ObservableObject {
         !isScanning && items.count < totalItemCount
     }
 
+    var itemsWithoutLocationCount: Int {
+        items.reduce(0) { count, item in
+            guard let coordinate = item.coordinate,
+                  coordinate.latitude != 0 || coordinate.longitude != 0 else {
+                return count + 1
+            }
+            return count
+        }
+    }
+
     init() {
         collapsedGroupIDsByMode = loadCollapsedGroupIDs()
 
@@ -55,12 +67,18 @@ final class LibraryViewModel: ObservableObject {
             .store(in: &cancellables)
 
         $items
-            .combineLatest($groupingMode)
-            .sink { [weak self] items, mode in
+            .combineLatest($groupingMode, $regionFilter)
+            .sink { [weak self] items, mode, regionFilter in
                 guard let self else { return }
                 self.regroupCount += 1
+                let filtered = regionFilter.map { bounds in
+                    items.filter { item in
+                        guard let coordinate = item.coordinate else { return false }
+                        return bounds.contains(coordinate)
+                    }
+                } ?? items
                 self.groupedItems = self.group(
-                    items: items,
+                    items: filtered,
                     mode: mode,
                     collapsedIDs: self.collapsedGroupIDs(for: mode)
                 )
@@ -121,6 +139,15 @@ final class LibraryViewModel: ObservableObject {
         guard canLoadMore, !isFastScrolling else { return }
         currentBatchOffset += batchSize
         await fetchBatch(offset: currentBatchOffset)
+    }
+
+    /// Load every page for the Places map. The grid stays paged; the map needs
+    /// all coordinates to cluster the full library.
+    func loadAllItems() async {
+        guard !isScanning else { return }
+        while canLoadMore && !Task.isCancelled {
+            await loadMoreItems()
+        }
     }
 
     private func setupLibrary(for url: URL) async {
@@ -403,6 +430,17 @@ final class LibraryViewModel: ObservableObject {
     }
 
     // MARK: - Grouping
+
+    /// Switch to a grid grouped by month, restricted to the map's current area.
+    func showGrid(in region: MKCoordinateRegion) {
+        guard let bounds = GeoBounds(region: region) else { return }
+        groupingMode = .months
+        regionFilter = bounds
+    }
+
+    func clearRegionFilter() {
+        regionFilter = nil
+    }
 
     func toggleCollapsed(for group: MediaGroup) {
         let mode = groupingMode
