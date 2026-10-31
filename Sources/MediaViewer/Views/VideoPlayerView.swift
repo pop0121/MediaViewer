@@ -16,19 +16,32 @@ struct VideoPlayerView: NSViewRepresentable {
         playerView.player = player
 
         context.coordinator.player = player
+        context.coordinator.currentURL = url
         player.play()
-        isPlaying = true
 
         return playerView
     }
 
     func updateNSView(_ nsView: AVPlayerView, context: Context) {
+        let coordinator = context.coordinator
+
+        // SwiftUI reuses the NSView across item changes, so the player must be
+        // repointed explicitly; otherwise the previous video keeps playing.
+        if coordinator.currentURL != url {
+            coordinator.player?.replaceCurrentItem(with: AVPlayerItem(url: url))
+            coordinator.currentURL = url
+        }
+
         guard let player = nsView.player else { return }
         if isPlaying {
             player.play()
         } else {
             player.pause()
         }
+    }
+
+    static func dismantleNSView(_ nsView: AVPlayerView, coordinator: Coordinator) {
+        coordinator.player?.pause()
     }
 
     func makeCoordinator() -> Coordinator {
@@ -38,6 +51,7 @@ struct VideoPlayerView: NSViewRepresentable {
     class Coordinator {
         @Binding var isPlaying: Bool
         var player: AVPlayer?
+        var currentURL: URL?
 
         init(isPlaying: Binding<Bool>) {
             self._isPlaying = isPlaying
