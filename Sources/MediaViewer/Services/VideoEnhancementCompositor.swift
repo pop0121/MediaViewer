@@ -135,8 +135,13 @@ final class VideoEnhancementCompositor: NSObject, AVVideoCompositing {
     }
 
     func startRequest(_ request: AVAsynchronousVideoCompositionRequest) {
-        queue.async { [weak self] in
-            self?.process(request)
+        // Retain the compositor until this request has been finished. A weak
+        // capture allowed the compositor to deallocate while requests were
+        // still queued (the macmini stress run logged "unfinished
+        // AVAsynchronousVideoCompositionRequest deallocated"), which can drop
+        // or black out frames during a toggle/seek.
+        queue.async {
+            self.process(request)
         }
     }
 
@@ -230,7 +235,13 @@ final class VideoEnhancementCompositor: NSObject, AVVideoCompositing {
     }
 
     private func transform(for request: AVAsynchronousVideoCompositionRequest) -> CGAffineTransform? {
-        guard let instruction = request.videoCompositionInstruction as? AVMutableVideoCompositionInstruction,
+        // AVFoundation supplies an immutable AVVideoCompositionInstruction to
+        // the custom compositor during playback. Do not narrow this cast to
+        // AVMutableVideoCompositionInstruction: that cast fails at playback
+        // time (while image generators may still use a mutable instruction),
+        // which leaves the source untransformed and crops portrait videos to
+        // the render size. This is the batch-7 portrait regression.
+        guard let instruction = request.videoCompositionInstruction as? AVVideoCompositionInstruction,
               let layer = instruction.layerInstructions.first else {
             return nil
         }
@@ -245,7 +256,27 @@ final class VideoEnhancementCompositor: NSObject, AVVideoCompositing {
         ) else {
             return nil
         }
-        return start
+        // `getTransformRamp` may return a static start/end pair. Interpolate
+        // for ramp instructions so the compositor and AVPlayerLayer agree at
+        // every composition time, not just at the start of the instruction.
+        guard timeRange.duration.seconds > 0 else { return start }
+        let elapsed = request.compositionTime.seconds - timeRange.start.seconds
+        let progress = min(1, max(0, elapsed / timeRange.duration.seconds))
+        return start.interpolated(to: end, progress: progress)
+    }
+}
+
+private extension CGAffineTransform {
+    func interpolated(to other: CGAffineTransform, progress: Double) -> CGAffineTransform {
+        let t = CGFloat(progress)
+        return CGAffineTransform(
+            a: a + (other.a - a) * t,
+            b: b + (other.b - b) * t,
+            c: c + (other.c - c) * t,
+            d: d + (other.d - d) * t,
+            tx: tx + (other.tx - tx) * t,
+            ty: ty + (other.ty - ty) * t
+        )
     }
 }
 
