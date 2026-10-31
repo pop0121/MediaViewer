@@ -11,9 +11,7 @@ struct FullscreenViewerView: View {
     @State private var lastOffset: CGSize = .zero
     @State private var videoIsPlaying = true
     @State private var eventMonitor: Any?
-    @State private var fullImage: NSImage?
-    @State private var placeholderImage: NSImage?
-    @State private var isLoadingFullImage = true
+    @StateObject private var imageLoader = ViewerImageLoader()
 
     private var currentIndex: Int? {
         guard let selected = viewModel.selectedItem else { return nil }
@@ -69,22 +67,18 @@ struct FullscreenViewerView: View {
         .ignoresSafeArea()
         .onAppear {
             installKeyMonitor()
-            Task { await loadPlaceholder() }
-            Task { await loadFullImage() }
+            loadCurrentItem()
             prefetchNeighbors()
         }
         .onChange(of: currentItem?.id) { _ in
             resetZoom()
-            fullImage = nil
-            placeholderImage = nil
-            isLoadingFullImage = true
             videoIsPlaying = true
-            Task { await loadPlaceholder() }
-            Task { await loadFullImage() }
+            loadCurrentItem()
             prefetchNeighbors()
         }
         .onDisappear {
             removeKeyMonitor()
+            imageLoader.reset()
             videoIsPlaying = false
         }
     }
@@ -97,23 +91,14 @@ struct FullscreenViewerView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         } else {
-            if let image = fullImage {
+            if let image = imageLoader.highResImage ?? imageLoader.screenImage ?? imageLoader.placeholder {
                 Image(nsImage: image)
                     .resizable()
                     .aspectRatio(contentMode: .fit)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if let placeholderImage {
-                Image(nsImage: placeholderImage)
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if isLoadingFullImage {
+            } else {
                 ProgressView()
                     .progressViewStyle(.circular)
-                    .foregroundStyle(.white)
-            } else {
-                Image(systemName: "photo")
-                    .font(.largeTitle)
                     .foregroundStyle(.white)
             }
         }
@@ -161,6 +146,8 @@ struct FullscreenViewerView: View {
                         offset = .zero
                         lastOffset = .zero
                     }
+                } else if scale >= 1.4, let item = currentItem {
+                    imageLoader.loadHighResolution(item: item, rootURL: rootURL)
                 }
             }
     }
@@ -257,19 +244,12 @@ struct FullscreenViewerView: View {
 
     // MARK: - Helpers
 
-    private func loadPlaceholder() async {
-        guard let item = currentItem, item.isPhoto else { return }
-        let input = ThumbnailInput(
-            relativePath: item.relativePath,
-            modificationDate: item.contentModificationDate,
-            mediaType: item.mediaType
-        )
-        let image = await rootURL.withSecurityScope {
-            await ThumbnailGenerator.shared.thumbnail(for: input, tier: .fullscreen, rootURL: rootURL)
+    private func loadCurrentItem() {
+        guard let item = currentItem else {
+            imageLoader.reset()
+            return
         }
-        if currentItem?.id == item.id {
-            placeholderImage = image?.image
-        }
+        Task { await imageLoader.load(item: item, rootURL: rootURL) }
     }
 
     /// Warm the 1024 px placeholders for the previous/next items.
@@ -293,46 +273,5 @@ struct FullscreenViewerView: View {
                 }
             }
         }
-    }
-
-    private func loadFullImage() async {
-        guard let item = currentItem, item.isPhoto else {
-            isLoadingFullImage = false
-            return
-        }
-        let url = rootURL.appendingPathComponent(item.relativePath)
-        let root = rootURL
-        let image = await Task.detached(priority: .userInitiated) { () -> ThumbnailImage? in
-            root.withSecurityScope {
-                Self.decodeFullImage(at: url)
-            }
-        }.value
-        guard currentItem?.id == item.id else { return }
-        fullImage = image?.image
-        isLoadingFullImage = false
-    }
-
-    /// Decode the full-resolution image off the main thread, honouring EXIF
-    /// orientation. The bitmap is created eagerly so drawing never decodes.
-    nonisolated private static func decodeFullImage(at url: URL) -> ThumbnailImage? {
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
-        let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
-        let width = properties?[kCGImagePropertyPixelWidth] as? Int ?? 0
-        let height = properties?[kCGImagePropertyPixelHeight] as? Int ?? 0
-        let maxPixel = max(width, height)
-
-        var options: [CFString: Any] = [
-            kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceShouldCacheImmediately: true,
-        ]
-        if maxPixel > 0 {
-            options[kCGImageSourceThumbnailMaxPixelSize] = maxPixel
-        }
-        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
-            return nil
-        }
-        let image = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
-        return ThumbnailImage(image: image)
     }
 }
