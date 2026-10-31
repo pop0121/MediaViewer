@@ -92,7 +92,8 @@ struct GalleryView: View {
                                     ForEach(group.items) { item in
                                         MediaCellView(
                                             item: item,
-                                            rootURL: rootURL
+                                            rootURL: rootURL,
+                                            isScrollingFast: viewModel.isFastScrolling
                                         )
                                         .contentShape(Rectangle())
                                         .onTapGesture {
@@ -129,12 +130,17 @@ struct GalleryView: View {
                         }
                     }
                     .padding(8)
+                    .background(
+                        ScrollActivityObserver { fast in
+                            viewModel.setFastScrolling(fast)
+                        }
+                    )
 
                     if viewModel.canLoadMore {
                         ProgressView()
                             .progressViewStyle(.circular)
                             .frame(maxWidth: .infinity, minHeight: 60)
-                            .task(id: viewModel.items.count) {
+                            .task(id: "\(viewModel.items.count)-\(viewModel.isFastScrolling)") {
                                 await viewModel.loadMoreItems()
                             }
                     }

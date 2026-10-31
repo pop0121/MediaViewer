@@ -13,6 +13,7 @@ final class LibraryViewModel: ObservableObject {
     @Published var isScanning = false
     @Published var scanProgress: String = ""
     @Published var scanFraction: Double?
+    @Published var isFastScrolling = false
     @Published var selectedItem: MediaItem?
     @Published var errorMessage: String?
     @Published var totalItemCount: Int = 0
@@ -27,6 +28,7 @@ final class LibraryViewModel: ObservableObject {
     private var maintenanceTask: Task<Void, Never>?
     private var prefetchTask: Task<Void, Never>?
     private var prefetchAnchor: Int?
+    private var prefetchStartIndex: Int?
     private var indexByID: [String: Int] = [:]
     private var locationIndices: [LocationKey: [Int]] = [:]
     private var dateKeyCache: [String: DateKeys] = [:]
@@ -112,7 +114,7 @@ final class LibraryViewModel: ObservableObject {
     }
 
     func loadMoreItems() async {
-        guard canLoadMore else { return }
+        guard canLoadMore, !isFastScrolling else { return }
         currentBatchOffset += batchSize
         await fetchBatch(offset: currentBatchOffset)
     }
@@ -196,6 +198,7 @@ final class LibraryViewModel: ObservableObject {
         items = updated
         rebuildIndices()
         prefetchAnchor = nil
+        prefetchStartIndex = nil
     }
 
     private func updateScanProgress(_ progress: ScanProgress) {
@@ -272,12 +275,31 @@ final class LibraryViewModel: ObservableObject {
         }
     }
 
+    /// Track fast scrolling; pause prefetch/generation while flinging and
+    /// resume around the latest visible item once scrolling settles.
+    func setFastScrolling(_ fast: Bool) {
+        guard fast != isFastScrolling else { return }
+        isFastScrolling = fast
+        if fast {
+            prefetchTask?.cancel()
+            prefetchTask = nil
+        } else if let anchor = prefetchAnchor {
+            startPrefetch(around: anchor)
+        }
+    }
+
     /// Warm the thumbnail cache for items around the visible cell.
     func prefetchThumbnails(around item: MediaItem) {
-        guard let rootURL, let index = indexByID[item.id] else { return }
-        if let anchor = prefetchAnchor, abs(anchor - index) < 8 { return }
+        guard let index = indexByID[item.id] else { return }
         prefetchAnchor = index
+        guard !isFastScrolling else { return }
+        if let lastStart = prefetchStartIndex, abs(lastStart - index) < 8 { return }
+        startPrefetch(around: index)
+    }
 
+    private func startPrefetch(around index: Int) {
+        guard let rootURL else { return }
+        prefetchStartIndex = index
         let lower = max(0, index - 4)
         let upper = min(items.count, index + 24)
         guard lower < upper else { return }
@@ -324,6 +346,7 @@ final class LibraryViewModel: ObservableObject {
         items = firstPage
         dateKeyCache = [:]
         prefetchAnchor = nil
+        prefetchStartIndex = nil
         rebuildIndices()
     }
 
