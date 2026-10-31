@@ -93,7 +93,8 @@ struct GalleryView: View {
                                         MediaCellView(
                                             item: item,
                                             rootURL: rootURL,
-                                            isScrollingFast: viewModel.isFastScrolling
+                                            isScrollingFast: viewModel.isFastScrolling,
+                                            tier: thumbnailTier
                                         )
                                         .contentShape(Rectangle())
                                         .onTapGesture {
@@ -102,7 +103,7 @@ struct GalleryView: View {
                                             }
                                         }
                                         .onAppear {
-                                            viewModel.prefetchThumbnails(around: item)
+                                            viewModel.prefetchThumbnails(around: item, tier: thumbnailTier)
                                         }
                                     }
                                 }
@@ -150,9 +151,16 @@ struct GalleryView: View {
     }
 
     private var gridColumns: [GridItem] {
-        let baseWidth: CGFloat = 160
-        let cellWidth = max(60, baseWidth / viewModel.effectiveZoomLevel)
-        return [GridItem(.adaptive(minimum: cellWidth), spacing: 8)]
+        [GridItem(.adaptive(minimum: gridCellWidth), spacing: 8)]
+    }
+
+    private var gridCellWidth: CGFloat {
+        max(60, 160 / viewModel.effectiveZoomLevel)
+    }
+
+    private var thumbnailTier: ThumbnailTier {
+        ThumbnailTier.tier(forCellWidth: gridCellWidth,
+                           backingScale: NSScreen.main?.backingScaleFactor ?? 2)
     }
 
     @ViewBuilder

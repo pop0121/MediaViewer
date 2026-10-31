@@ -29,6 +29,8 @@ final class LibraryViewModel: ObservableObject {
     private var prefetchTask: Task<Void, Never>?
     private var prefetchAnchor: Int?
     private var prefetchStartIndex: Int?
+    private var prefetchStartTier: ThumbnailTier?
+    private var prefetchTier: ThumbnailTier = .grid
     private var indexByID: [String: Int] = [:]
     private var locationIndices: [LocationKey: [Int]] = [:]
     private var dateKeyCache: [String: DateKeys] = [:]
@@ -199,6 +201,7 @@ final class LibraryViewModel: ObservableObject {
         rebuildIndices()
         prefetchAnchor = nil
         prefetchStartIndex = nil
+        prefetchStartTier = nil
     }
 
     private func updateScanProgress(_ progress: ScanProgress) {
@@ -284,22 +287,26 @@ final class LibraryViewModel: ObservableObject {
             prefetchTask?.cancel()
             prefetchTask = nil
         } else if let anchor = prefetchAnchor {
-            startPrefetch(around: anchor)
+            startPrefetch(around: anchor, tier: prefetchTier)
         }
     }
 
     /// Warm the thumbnail cache for items around the visible cell.
-    func prefetchThumbnails(around item: MediaItem) {
+    func prefetchThumbnails(around item: MediaItem, tier: ThumbnailTier = .grid) {
         guard let index = indexByID[item.id] else { return }
         prefetchAnchor = index
+        prefetchTier = tier
         guard !isFastScrolling else { return }
-        if let lastStart = prefetchStartIndex, abs(lastStart - index) < 8 { return }
-        startPrefetch(around: index)
+        if prefetchStartTier == tier, let lastStart = prefetchStartIndex, abs(lastStart - index) < 8 {
+            return
+        }
+        startPrefetch(around: index, tier: tier)
     }
 
-    private func startPrefetch(around index: Int) {
+    private func startPrefetch(around index: Int, tier: ThumbnailTier) {
         guard let rootURL else { return }
         prefetchStartIndex = index
+        prefetchStartTier = tier
         let lower = max(0, index - 4)
         let upper = min(items.count, index + 24)
         guard lower < upper else { return }
@@ -315,7 +322,7 @@ final class LibraryViewModel: ObservableObject {
         prefetchTask = Task.detached(priority: .utility) {
             for input in inputs {
                 if Task.isCancelled { return }
-                _ = await ThumbnailGenerator.shared.thumbnail(for: input, tier: .grid, rootURL: rootURL)
+                _ = await ThumbnailGenerator.shared.thumbnail(for: input, tier: tier, rootURL: rootURL)
             }
         }
     }
@@ -347,6 +354,7 @@ final class LibraryViewModel: ObservableObject {
         dateKeyCache = [:]
         prefetchAnchor = nil
         prefetchStartIndex = nil
+        prefetchStartTier = nil
         rebuildIndices()
     }
 

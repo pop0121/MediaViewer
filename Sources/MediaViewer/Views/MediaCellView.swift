@@ -5,6 +5,7 @@ struct MediaCellView: View {
     let item: MediaItem
     let rootURL: URL
     let isScrollingFast: Bool
+    let tier: ThumbnailTier
 
     @State private var thumbnail: NSImage?
     @State private var isLoading = true
@@ -59,7 +60,7 @@ struct MediaCellView: View {
     }
 
     private var taskID: String {
-        "\(item.id)|\(item.contentModificationDate.timeIntervalSince1970)"
+        "\(item.id)|\(item.contentModificationDate.timeIntervalSince1970)|\(tier.rawValue)"
     }
 
     private func loadThumbnail() async {
@@ -73,7 +74,7 @@ struct MediaCellView: View {
         )
 
         let image = await rootURL.withSecurityScope {
-            await ThumbnailGenerator.shared.thumbnail(for: input, tier: .grid, rootURL: rootURL)
+            await ThumbnailGenerator.shared.thumbnail(for: input, tier: tier, rootURL: rootURL)
         }
 
         guard !Task.isCancelled, !isScrollingFast else { return }

@@ -16,15 +16,18 @@ struct ThumbnailInput: Sendable {
     let mediaType: MediaItem.MediaType
 }
 
-enum ThumbnailTier: String, Sendable {
-    /// Grid cells are 60–160 pt wide, so 320 px covers 2× Retina at max zoom.
+enum ThumbnailTier: String, Sendable, CaseIterable {
+    /// Default grid cells (up to 160 pt at 2× Retina).
     case grid
+    /// Larger zoomed-out cells; requested when cell pixels exceed 320.
+    case gridLarge = "grid-640"
     /// Placeholder for the full-screen viewer, replaced by the original image.
     case fullscreen
 
     var maxPixelSize: Int {
         switch self {
         case .grid: return 320
+        case .gridLarge: return 640
         case .fullscreen: return 1024
         }
     }
@@ -32,8 +35,17 @@ enum ThumbnailTier: String, Sendable {
     var jpegQuality: CGFloat {
         switch self {
         case .grid: return 0.8
+        case .gridLarge: return 0.82
         case .fullscreen: return 0.85
         }
+    }
+
+    /// Pick the smallest tier that still covers `cellWidth × backingScale`.
+    static func tier(forCellWidth width: CGFloat, backingScale: CGFloat) -> ThumbnailTier {
+        let pixels = width * backingScale
+        if pixels <= 320 { return .grid }
+        if pixels <= 640 { return .gridLarge }
+        return .fullscreen
     }
 }
 
@@ -41,6 +53,7 @@ final class ThumbnailGenerator: @unchecked Sendable {
     static let shared = ThumbnailGenerator()
 
     private let gridCache = NSCache<NSString, NSImage>()
+    private let gridLargeCache = NSCache<NSString, NSImage>()
     private let fullscreenCache = NSCache<NSString, NSImage>()
     private let stateLock = NSLock()
     private var inFlight: [String: Task<ThumbnailImage?, Never>] = [:]
@@ -49,6 +62,9 @@ final class ThumbnailGenerator: @unchecked Sendable {
         // 320 px bitmaps are ~0.3 MB decoded: 256 MB ≈ 850 images.
         gridCache.countLimit = 2_000
         gridCache.totalCostLimit = 256 * 1024 * 1024
+        // 640 px bitmaps are ~1.1 MB decoded: 192 MB ≈ 176 images.
+        gridLargeCache.countLimit = 512
+        gridLargeCache.totalCostLimit = 192 * 1024 * 1024
         // 1024 px placeholders are ~3 MB decoded: 128 MB ≈ 42 images.
         fullscreenCache.countLimit = 64
         fullscreenCache.totalCostLimit = 128 * 1024 * 1024
@@ -131,7 +147,7 @@ final class ThumbnailGenerator: @unchecked Sendable {
 
     /// Remove every tier for a deleted/changed item.
     func removeThumbnails(for input: ThumbnailInput, rootURL: URL) {
-        for tier in [ThumbnailTier.grid, .fullscreen] {
+        for tier in ThumbnailTier.allCases {
             guard let url = thumbnailURL(for: input, tier: tier, rootURL: rootURL) else { continue }
             try? FileManager.default.removeItem(at: url)
         }
@@ -142,7 +158,7 @@ final class ThumbnailGenerator: @unchecked Sendable {
         var validPaths = Set<String>()
         validPaths.reserveCapacity(validInputs.count * 2)
         for input in validInputs {
-            for tier in [ThumbnailTier.grid, .fullscreen] {
+            for tier in ThumbnailTier.allCases {
                 if let url = thumbnailURL(for: input, tier: tier, rootURL: rootURL) {
                     validPaths.insert(url.path)
                 }
@@ -172,6 +188,7 @@ final class ThumbnailGenerator: @unchecked Sendable {
     private func cache(for tier: ThumbnailTier) -> NSCache<NSString, NSImage> {
         switch tier {
         case .grid: return gridCache
+        case .gridLarge: return gridLargeCache
         case .fullscreen: return fullscreenCache
         }
     }
