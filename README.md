@@ -14,9 +14,11 @@ A native macOS app for browsing photos and videos stored in a user-selected root
 - Navigate with arrow keys, close with `Esc`, toggle video play/pause with `Space`.
 - Videos autoplay muted in the viewer; switching media replaces the player item.
 - Grid and full-screen images are decoded off the main thread; the viewer shows a
-  1024px placeholder while the full-resolution image decodes.
-- Generates and caches tiered thumbnails (320px grid, 1024px full-screen) and a
-  metadata index in a hidden `.mediaviewer/` folder under the root path.
+  1024px placeholder, then a 2000px screen-sized decode, and decodes the native
+  resolution only when zoomed past 1.4×.
+- Generates and caches tiered thumbnails (320px grid, 640px zoomed-out grid,
+  1024px full-screen) and a metadata index in a hidden `.mediaviewer/` folder
+  under the root path.
 - Media files are never modified.
 
 ## Requirements
@@ -92,11 +94,27 @@ When wrapping this SPM package into an `.app` bundle for distribution, apply the
     <true/>
     <key>com.apple.security.files.user-selected.read-only</key>
     <true/>
+    <key>com.apple.security.network.client</key>
+    <true/>
 </dict>
 </plist>
 ```
 
 The app already creates and resolves security-scoped bookmarks for the chosen root folder.
+
+## Reverse Geocoding Configuration
+
+Amap (Gaode) is preferred inside China and Nominatim (OpenStreetMap) elsewhere;
+either backend falls back to the other on failure. No key is committed.
+
+- `MEDIAVIEWER_AMAP_KEY` (or Info.plist `AmapAPIKey`): Amap key. Without it the
+  Amap backend fails locally and Nominatim handles requests.
+- `MEDIAVIEWER_NOMINATIM_CONTACT` (or Info.plist `NominatimContact`): contact
+  string included in the Nominatim User-Agent. Nominatim requests are throttled
+  to 1/s and results are cached.
+
+Location grouping shows the required “© OpenStreetMap contributors (ODbL)”
+attribution.
 
 ## Debugging
 
@@ -113,9 +131,10 @@ MEDIAVIEWER_TIMING=1 swift run MediaViewer
 ## Known Limitations / TODO
 
 - The app keeps all indexed `MediaItem` values in memory. Very large libraries (>100k items) may need paging or a fetched-results controller.
-- The first screen appears after the index pass finishes; changes are not published incrementally during indexing.
-- The grid always requests the 320px tier. At zoom levels that make cells larger than 160pt on Retina, images are upscaled.
-- Full-resolution photos are decoded whole (up to ~84MB for a 22MP JPEG) on a background thread; the viewer shows the 1024px placeholder until decoded.
-- Reverse geocoding is throttled by `CLGeocoder`; large batches may take time and are done in a background pass after scanning.
+- The grid is published incrementally during indexing, but full-library scans still take longer on slow volumes.
+- The 2000px screen decode of a 22MP JPEG takes roughly 200–300ms on the test machine; the 1024px placeholder is visible immediately.
+- 640px/1024px tiers are generated on demand, so browsing zoomed out over a large library costs extra disk space (about 75KB per 640px image).
+- Reverse geocoding is throttled to 1 request/s and runs as a background, cancellable pass after scanning; failed lookups are retried on the next scan.
+- Nominatim may be unreachable from some networks; configure an Amap key for reliable in-China geocoding.
 - Video location metadata parsing is best-effort for common QuickTime ISO 6709 strings.
 - Only `.jpg`, `.jpeg`, `.mp4`, and `.mov` are indexed (no HEIC/PNG/Live Photo).
