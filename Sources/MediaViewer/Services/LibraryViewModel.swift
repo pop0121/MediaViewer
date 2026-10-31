@@ -35,7 +35,7 @@ final class LibraryViewModel: ObservableObject {
     private var collapsedGroupIDsByMode: [String: Set<String>] = [:]
 
     var canLoadMore: Bool {
-        items.count < totalItemCount
+        !isScanning && items.count < totalItemCount
     }
 
     init() {
@@ -142,9 +142,15 @@ final class LibraryViewModel: ObservableObject {
             let result = try await rootURL.withSecurityScope {
                 let backgroundContext = persistence.container.newBackgroundContext()
                 let scanner = MediaScanner(context: backgroundContext)
-                return try await scanner.scan(rootURL: rootURL) { [weak self] progress in
-                    await self?.updateScanProgress(progress)
-                }
+                return try await scanner.scan(
+                    rootURL: rootURL,
+                    progress: { [weak self] progress in
+                        await self?.updateScanProgress(progress)
+                    },
+                    indexed: { [weak self] items in
+                        await self?.mergeIndexedItems(items)
+                    }
+                )
             }
             Perf.end(scanInterval, "processed=\(result.processed) removed=\(result.removed)")
 
@@ -160,6 +166,36 @@ final class LibraryViewModel: ObservableObject {
         } catch {
             errorMessage = "Scan failed: \(error.localizedDescription)"
         }
+    }
+
+    /// Append or refresh items that the scanner has already committed. This
+    /// runs while scanning, so the grid does not wait for the full index.
+    private func mergeIndexedItems(_ newItems: [MediaItem]) {
+        guard !newItems.isEmpty else { return }
+        // Mutate a local copy and publish once per batch; appending directly to
+        // the @Published array would re-group the whole library once per item.
+        var updated = items
+        var changed = false
+        for item in newItems {
+            if let index = indexByID[item.id] {
+                let existing = updated[index]
+                if existing.contentModificationDate != item.contentModificationDate
+                    || existing.creationDate != item.creationDate
+                    || existing.locationName != item.locationName {
+                    updated[index] = item
+                    dateKeyCache.removeValue(forKey: item.id)
+                    changed = true
+                }
+            } else {
+                updated.append(item)
+                indexByID[item.id] = updated.count - 1
+                changed = true
+            }
+        }
+        guard changed else { return }
+        items = updated
+        rebuildIndices()
+        prefetchAnchor = nil
     }
 
     private func updateScanProgress(_ progress: ScanProgress) {
@@ -265,13 +301,12 @@ final class LibraryViewModel: ObservableObject {
     private func fetchItems() async {
         guard let persistence else { return }
         currentBatchOffset = 0
-        items = []
-        indexByID = [:]
-        locationIndices = [:]
-        dateKeyCache = [:]
-        prefetchAnchor = nil
 
         let context = persistence.container.viewContext
+        // Sibling background contexts wrote during the scan; drop cached
+        // objects so the reconciled fetch below sees the committed state.
+        context.reset()
+
         let countRequest = NSFetchRequest<MediaItemEntity>(entityName: "MediaItemEntity")
         countRequest.resultType = .countResultType
 
@@ -285,11 +320,21 @@ final class LibraryViewModel: ObservableObject {
             return
         }
 
-        await fetchBatch(offset: 0)
+        guard let firstPage = await fetchBatchItems(offset: 0) else { return }
+        items = firstPage
+        dateKeyCache = [:]
+        prefetchAnchor = nil
+        rebuildIndices()
     }
 
     private func fetchBatch(offset: Int) async {
-        guard let persistence else { return }
+        guard let newItems = await fetchBatchItems(offset: offset) else { return }
+        items.append(contentsOf: newItems)
+        indexAppendedItems(from: items.count - newItems.count, to: items.count)
+    }
+
+    private func fetchBatchItems(offset: Int) async -> [MediaItem]? {
+        guard let persistence else { return nil }
         let context = persistence.container.viewContext
         let request = NSFetchRequest<MediaItemEntity>(entityName: "MediaItemEntity")
         request.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
@@ -300,25 +345,17 @@ final class LibraryViewModel: ObservableObject {
             let entities = try await context.perform {
                 try context.fetch(request)
             }
-            let newItems = entities.map { entity in
-                MediaItem(
-                    id: entity.relativePath,
-                    relativePath: entity.relativePath,
-                    fileName: entity.fileName,
-                    fileSize: entity.fileSize,
-                    contentModificationDate: entity.contentModificationDate,
-                    creationDate: entity.creationDate,
-                    coordinate: entity.coordinate,
-                    locationName: entity.locationName,
-                    mediaType: entity.mediaType,
-                    thumbnailPath: entity.thumbnailPath
-                )
-            }
-            items.append(contentsOf: newItems)
-            indexAppendedItems(from: items.count - newItems.count, to: items.count)
+            return entities.map(MediaItem.init(entity:))
         } catch {
             errorMessage = "Failed to load items: \(error.localizedDescription)"
+            return nil
         }
+    }
+
+    private func rebuildIndices() {
+        indexByID.removeAll(keepingCapacity: true)
+        locationIndices.removeAll(keepingCapacity: true)
+        indexAppendedItems(from: 0, to: items.count)
     }
 
     private func indexAppendedItems(from lowerBound: Int, to upperBound: Int) {

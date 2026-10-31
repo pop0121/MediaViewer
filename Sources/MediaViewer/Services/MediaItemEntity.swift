@@ -38,6 +38,24 @@ final class MediaItemEntity: NSManagedObject {
     }
 }
 
+extension MediaItem {
+    /// Lightweight snapshot of an indexed entity for the UI layer.
+    init(entity: MediaItemEntity) {
+        self.init(
+            id: entity.relativePath,
+            relativePath: entity.relativePath,
+            fileName: entity.fileName,
+            fileSize: entity.fileSize,
+            contentModificationDate: entity.contentModificationDate,
+            creationDate: entity.creationDate,
+            coordinate: entity.coordinate,
+            locationName: entity.locationName,
+            mediaType: entity.mediaType,
+            thumbnailPath: entity.thumbnailPath
+        )
+    }
+}
+
 @objc(LocationNameEntity)
 final class LocationNameEntity: NSManagedObject {
     @NSManaged var latitude: Double

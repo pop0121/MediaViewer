@@ -39,6 +39,9 @@ extension MediaItem: Hashable {
     }
 }
 
+// The struct is an immutable value snapshot; all fields are value types.
+extension MediaItem: @unchecked Sendable {}
+
 extension MediaItem {
     /// A display title for the item.
     var displayName: String {

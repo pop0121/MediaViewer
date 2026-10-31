@@ -8,6 +8,10 @@ final class MediaScanner {
     /// This keeps memory reasonable while still saturating I/O for video metadata.
     private static let maxConcurrentExtractions = 8
 
+    /// Metadata is applied/saved in batches of this size so the grid can publish
+    /// indexed items before the whole scan finishes, without one save per file.
+    private static let applyBatchSize = 256
+
     private let context: NSManagedObjectContext
     private let metadataExtractor = MetadataExtractor()
 
@@ -18,14 +22,16 @@ final class MediaScanner {
     /// Scan the root URL and update the Core Data index. Returns the number of new/changed items processed.
     func scan(
         rootURL: URL,
-        progress: (@Sendable (ScanProgress) async -> Void)? = nil
+        progress: (@Sendable (ScanProgress) async -> Void)? = nil,
+        indexed: (@Sendable ([MediaItem]) async -> Void)? = nil
     ) async throws -> ScanResult {
-        try await self._scan(rootURL: rootURL, progress: progress)
+        try await self._scan(rootURL: rootURL, progress: progress, indexed: indexed)
     }
 
     private func _scan(
         rootURL: URL,
-        progress: (@Sendable (ScanProgress) async -> Void)?
+        progress: (@Sendable (ScanProgress) async -> Void)?,
+        indexed: (@Sendable ([MediaItem]) async -> Void)?
     ) async throws -> ScanResult {
         let fileManager = FileManager.default
         let enumerateInterval = Perf.begin("scan.enumerate")
@@ -98,48 +104,40 @@ final class MediaScanner {
             return true
         }
 
-        // 3. Extract metadata concurrently with bounded parallelism.
+        // 3. Extract metadata concurrently and apply it in batches. Each saved
+        //    batch is published immediately so the grid fills during the scan.
         await progress?(ScanProgress(phase: .indexing, completed: 0, total: filesNeedingMetadata.count))
-        let metadataInterval = Perf.begin("scan.metadata")
-        let extractedMetadata = try await extractMetadataConcurrently(
-            files: filesNeedingMetadata,
-            limit: Self.maxConcurrentExtractions,
-            progress: progress
-        )
-        Perf.end(metadataInterval, "changed=\(filesNeedingMetadata.count)")
+        let applyInterval = Perf.begin("scan.applyBatches")
+        let chunks = filesNeedingMetadata.chunked(into: Self.maxConcurrentExtractions)
+        var pending: [(FileToIndex, ExtractedMetadata)] = []
+        pending.reserveCapacity(Self.applyBatchSize)
+        var publishedCount = 0
+
+        for (chunkIndex, chunk) in chunks.enumerated() {
+            try Task.checkCancellation()
+            pending.append(contentsOf: await extractMetadata(for: chunk))
+
+            let isLastChunk = chunkIndex == chunks.count - 1
+            if pending.count >= Self.applyBatchSize || isLastChunk {
+                let batch = try await applyMetadataBatch(pending, itemsByPath: itemsByPath)
+                for (path, entity) in batch.newEntities {
+                    itemsByPath[path] = entity
+                }
+                publishedCount += batch.items.count
+                await indexed?(batch.items)
+                await progress?(ScanProgress(phase: .indexing, completed: publishedCount, total: filesNeedingMetadata.count))
+                pending.removeAll(keepingCapacity: true)
+            }
+        }
+        Perf.end(applyInterval, "changed=\(filesNeedingMetadata.count) published=\(publishedCount)")
         try Task.checkCancellation()
 
-        // 4. Apply all updates in a single Core Data perform block.
-        let processed = extractedMetadata.count
-        await progress?(ScanProgress(phase: .saving, completed: processed, total: filesNeedingMetadata.count))
+        // 4. Apply deletions in a final save. A cancelled scan keeps everything
+        //    that was already indexed; the next scan finishes reconciliation.
         let removedPaths = Set(itemsByPath.keys).subtracting(discoveredRelativePaths)
+        await progress?(ScanProgress(phase: .saving, completed: publishedCount, total: filesNeedingMetadata.count))
         let saveInterval = Perf.begin("scan.save")
         try await context.perform {
-            for (file, metadata) in extractedMetadata {
-                let entity: MediaItemEntity
-                if let existing = itemsByPath[file.relativePath] {
-                    entity = existing
-                } else {
-                    entity = MediaItemEntity(context: self.context)
-                    entity.relativePath = file.relativePath
-                }
-
-                entity.fileName = file.url.lastPathComponent
-                entity.fileSize = file.fileSize
-                entity.contentModificationDate = file.modificationDate
-                entity.creationDate = metadata.creationDate
-                entity.coordinate = metadata.coordinate
-                entity.mediaType = metadata.mediaType
-                entity.thumbnailPath = nil
-
-                if let coordinate = metadata.coordinate {
-                    entity.locationName = GeocoderService.shared.cachedName(for: coordinate, in: self.context)
-                } else {
-                    entity.locationName = nil
-                }
-            }
-
-            // Remove entries for deleted files.
             let thumbnailGenerator = ThumbnailGenerator.shared
             for path in removedPaths {
                 if let entity = itemsByPath[path] {
@@ -155,45 +153,69 @@ final class MediaScanner {
 
             try self.context.save()
         }
-        Perf.end(saveInterval, "processed=\(processed) removed=\(removedPaths.count)")
+        Perf.end(saveInterval, "processed=\(publishedCount) removed=\(removedPaths.count)")
 
-        return ScanResult(processed: processed, removed: removedPaths.count)
+        return ScanResult(processed: publishedCount, removed: removedPaths.count)
     }
 
-    /// Extract metadata for many files concurrently, but never more than `limit` at a time.
-    private func extractMetadataConcurrently(
-        files: [FileToIndex],
-        limit: Int,
-        progress: (@Sendable (ScanProgress) async -> Void)?
-    ) async throws -> [(FileToIndex, ExtractedMetadata)] {
-        var results: [(FileToIndex, ExtractedMetadata)] = []
-        results.reserveCapacity(files.count)
-
-        // Process in sliding windows to bound memory and AVAsset concurrency.
-        let chunks = files.chunked(into: limit)
-        for (chunkIndex, chunk) in chunks.enumerated() {
-            try Task.checkCancellation()
-            let chunkResults = await withTaskGroup(of: (FileToIndex, ExtractedMetadata).self) { group in
-                for file in chunk {
-                    group.addTask {
-                        let metadata = self.metadataExtractor.extract(from: file.url)
-                        return (file, metadata)
-                    }
+    /// Extract metadata for one chunk with bounded task-group concurrency.
+    private func extractMetadata(for files: [FileToIndex]) async -> [(FileToIndex, ExtractedMetadata)] {
+        await withTaskGroup(of: (FileToIndex, ExtractedMetadata).self) { group in
+            for file in files {
+                group.addTask {
+                    let metadata = self.metadataExtractor.extract(from: file.url)
+                    return (file, metadata)
                 }
-                var collected: [(FileToIndex, ExtractedMetadata)] = []
-                for await result in group {
-                    collected.append(result)
-                }
-                return collected
             }
-            results.append(contentsOf: chunkResults)
-            // Throttle UI hops: main-actor callbacks every ~64 files.
-            if chunkIndex % 8 == 0 || chunkIndex == chunks.count - 1 {
-                await progress?(ScanProgress(phase: .indexing, completed: results.count, total: files.count))
+            var collected: [(FileToIndex, ExtractedMetadata)] = []
+            collected.reserveCapacity(files.count)
+            for await result in group {
+                collected.append(result)
             }
+            return collected
         }
+    }
 
-        return results
+    /// Insert/update one batch and save it. Returns UI snapshots plus entities
+    /// created here so later batches can update them without re-fetching.
+    private func applyMetadataBatch(
+        _ batch: [(FileToIndex, ExtractedMetadata)],
+        itemsByPath: [String: MediaItemEntity]
+    ) async throws -> (items: [MediaItem], newEntities: [(String, MediaItemEntity)]) {
+        try await context.perform {
+            var entities: [MediaItemEntity] = []
+            entities.reserveCapacity(batch.count)
+            var newEntities: [(String, MediaItemEntity)] = []
+
+            for (file, metadata) in batch {
+                let entity: MediaItemEntity
+                if let existing = itemsByPath[file.relativePath] {
+                    entity = existing
+                } else {
+                    entity = MediaItemEntity(context: self.context)
+                    entity.relativePath = file.relativePath
+                    newEntities.append((file.relativePath, entity))
+                }
+
+                entity.fileName = file.url.lastPathComponent
+                entity.fileSize = file.fileSize
+                entity.contentModificationDate = file.modificationDate
+                entity.creationDate = metadata.creationDate
+                entity.coordinate = metadata.coordinate
+                entity.mediaType = metadata.mediaType
+                entity.thumbnailPath = nil
+
+                if let coordinate = metadata.coordinate {
+                    entity.locationName = GeocoderService.shared.cachedName(for: coordinate, in: self.context)
+                } else {
+                    entity.locationName = nil
+                }
+                entities.append(entity)
+            }
+
+            try self.context.save()
+            return (entities.map(MediaItem.init(entity:)), newEntities)
+        }
     }
 
     private func fetchAllItems() throws -> [MediaItemEntity] {
