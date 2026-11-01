@@ -19,6 +19,7 @@ final class LibraryViewModel: ObservableObject {
     @Published var gridDensity: Double = 1.0
     @Published var isScanning = false
     @Published var scanProgress: String = ""
+    @Published var scanNotice: String = ""
     @Published var scanFraction: Double?
     @Published var isFastScrolling = false
     @Published var selectedItem: MediaItem?
@@ -131,11 +132,14 @@ final class LibraryViewModel: ObservableObject {
     }
 
     func loadStoredRoot() {
+        let bookmarkInterval = Perf.begin("startup.bookmark")
         do {
             let url = try BookmarkStore.shared.loadRootURL()
+            Perf.end(bookmarkInterval)
             rootURL = url
             startScan(for: url)
         } catch {
+            Perf.end(bookmarkInterval, "noBookmark")
             // No stored bookmark or stale bookmark; show selector.
             rootURL = nil
         }
@@ -149,14 +153,17 @@ final class LibraryViewModel: ObservableObject {
         totalItemCount = 0
         selectedItem = nil
         scanProgress = ""
+        scanNotice = ""
         try? BookmarkStore.shared.saveBookmark(for: url)
         startScan(for: url)
     }
 
-    func refresh() async {
+    func refresh(forceFullScan: Bool = false) async {
         guard let rootURL else { return }
         cancelWork()
-        let task = Task { await self.performScan(rootURL: rootURL) }
+        let task = Task {
+            await self.performScan(rootURL: rootURL, forceFullScan: forceFullScan)
+        }
         scanTask = task
         await withTaskCancellationHandler {
             await task.value
@@ -178,7 +185,7 @@ final class LibraryViewModel: ObservableObject {
 
     private func startScan(for url: URL) {
         scanTask?.cancel()
-        scanTask = Task { await self.setupLibrary(for: url) }
+        scanTask = Task { await self.setupLibrary(for: url, forceFullScan: false) }
     }
 
     func loadMoreItems() async {
@@ -235,7 +242,7 @@ final class LibraryViewModel: ObservableObject {
         }
     }
 
-    private func setupLibrary(for url: URL) async {
+    private func setupLibrary(for url: URL, forceFullScan: Bool) async {
         do {
             let opened = try url.withSecurityScope {
                 try PersistenceController.openForRoot(url)
@@ -244,7 +251,7 @@ final class LibraryViewModel: ObservableObject {
             Log.library.notice(
                 "Opened library root=\(url.path, privacy: .public) outcome=\(opened.outcome.rawValue, privacy: .public)"
             )
-            await performScan(rootURL: url)
+            await performScan(rootURL: url, forceFullScan: forceFullScan)
         } catch is CancellationError {
             scanProgress = "Cancelled"
         } catch {
@@ -257,9 +264,10 @@ final class LibraryViewModel: ObservableObject {
         }
     }
 
-    private func performScan(rootURL: URL) async {
+    private func performScan(rootURL: URL, forceFullScan: Bool) async {
         isScanning = true
         scanProgress = "Scanning…"
+        scanNotice = ""
         scanFraction = nil
         defer { isScanning = false }
 
@@ -280,6 +288,7 @@ final class LibraryViewModel: ObservableObject {
                 let scanner = MediaScanner(context: backgroundContext)
                 return try await scanner.scan(
                     rootURL: rootURL,
+                    forceFullScan: forceFullScan,
                     progress: { [weak self] progress in
                         await self?.updateScanProgress(progress)
                     },
@@ -296,9 +305,13 @@ final class LibraryViewModel: ObservableObject {
             await fetchItems()
             Perf.end(fetchInterval, "total=\(totalItemCount)")
             Log.library.notice("First screen items=\(self.items.count) total=\(self.totalItemCount)")
-            scanProgress = "Indexed \(result.processed) new/changed items, \(totalItemCount) total."
+            let mode = result.fullScan ? "Full scan" : "Incremental scan"
+            scanProgress = "\(mode): \(result.processed) changed, \(result.removed) removed, \(totalItemCount) total."
+            scanNotice = result.fullScan
+                ? "Full scan completed."
+                : "Skipped \(result.skippedDirectories)/\(result.totalDirectories) unchanged folders. In-place file edits that keep folder mtime unchanged need Full Rescan."
             Log.library.notice(
-                "Scan complete root=\(rootURL.path, privacy: .public) processed=\(result.processed) total=\(self.totalItemCount)"
+                "Scan complete root=\(rootURL.path, privacy: .public) full=\(result.fullScan) processed=\(result.processed) removed=\(result.removed) skippedDirs=\(result.skippedDirectories)/\(result.totalDirectories) total=\(self.totalItemCount)"
             )
             startMaintenance(rootURL: rootURL)
             startTimelineHydration()
@@ -346,9 +359,21 @@ final class LibraryViewModel: ObservableObject {
 
     private func updateScanProgress(_ progress: ScanProgress) {
         switch progress.phase {
+        case .comparingDirectories:
+            scanProgress = "Comparing \(progress.directoriesScanned)/\(progress.directoriesTotal) folders, skipped \(progress.directoriesSkipped)…"
+            scanFraction = progress.directoriesTotal > 0
+                ? Double(progress.directoriesScanned) / Double(progress.directoriesTotal)
+                : nil
         case .enumerating:
-            scanProgress = "Scanning… \(progress.completed) files found"
-            scanFraction = nil
+            if progress.directoriesTotal > 0 {
+                scanProgress = "Scanning changed folders \(progress.directoriesScanned)/\(progress.directoriesTotal), skipped \(progress.directoriesSkipped)…"
+                scanFraction = progress.directoriesTotal > 0
+                    ? Double(progress.directoriesScanned) / Double(progress.directoriesTotal)
+                    : nil
+            } else {
+                scanProgress = "Scanning… \(progress.completed) files found"
+                scanFraction = nil
+            }
         case .indexing:
             scanProgress = "Indexing \(progress.completed) of \(progress.total)…"
             scanFraction = progress.total > 0

@@ -80,6 +80,21 @@ struct GalleryView: View {
                 .background(Color(nsColor: .controlBackgroundColor))
             }
 
+            if !viewModel.isScanning && !viewModel.scanNotice.isEmpty {
+                HStack(spacing: 6) {
+                    Image(systemName: "info.circle")
+                    Text(viewModel.scanNotice)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .help(viewModel.scanNotice)
+                    Spacer()
+                }
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 3)
+            }
+
             if viewModel.isScanning && viewModel.items.isEmpty {
                 Color.clear
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -323,6 +338,15 @@ struct GalleryView: View {
             }) {
                 Image(systemName: "arrow.clockwise")
             }
+            .help("Scan for changes (incremental)")
+            .disabled(viewModel.isScanning)
+
+            Button(action: {
+                Task { await viewModel.refresh(forceFullScan: true) }
+            }) {
+                Image(systemName: "arrow.triangle.2.circlepath")
+            }
+            .help("Full rescan (ignore directory fingerprints)")
             .disabled(viewModel.isScanning)
 
             Button("Change Folder…") {
