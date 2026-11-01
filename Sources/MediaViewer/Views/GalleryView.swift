@@ -114,86 +114,33 @@ struct GalleryView: View {
 
     @ViewBuilder
     private func gridContent(rootURL: URL) -> some View {
-        ScrollViewReader { proxy in
-        ScrollView {
-            LazyVGrid(
-                columns: gridColumns,
-                spacing: 8,
-                pinnedViews: [.sectionHeaders]
-            ) {
-                ForEach(viewModel.groupedItems) { group in
-                    Section {
-                        if !group.isCollapsed {
-                            ForEach(group.items) { item in
-                                MediaCellView(
-                                    item: item,
-                                    rootURL: rootURL,
-                                    isScrollingFast: viewModel.isFastScrolling,
-                                    tier: thumbnailTier
-                                )
-                                .contentShape(Rectangle())
-                                .onTapGesture {
-                                    withAnimation(.easeOut(duration: 0.18)) {
-                                        viewModel.selectedItem = item
-                                    }
-                                }
-                                .onAppear {
-                                    viewModel.prefetchThumbnails(around: item, tier: thumbnailTier)
-                                }
-                            }
-                        }
-                    } header: {
-                        Button {
-                            viewModel.toggleCollapsed(for: group)
-                        } label: {
-                            HStack {
-                                Image(systemName: group.isCollapsed ? "chevron.right" : "chevron.down")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                Text(group.title)
-                                    .font(.headline)
-                                Spacer()
-                                Text("\(group.count) items")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                        }
-                        .buttonStyle(.plain)
-                        .background(Color(nsColor: .controlBackgroundColor))
-                        .background(SectionFrameReader(id: group.id, coordinateSpace: "gridScroll"))
-                        .id(group.id)
-                    }
+        GridCollectionView(
+            groups: viewModel.groupedItems,
+            rootURL: rootURL,
+            tier: thumbnailTier,
+            minimumItemWidth: gridCellWidth,
+            scrollTarget: viewModel.scrollTarget,
+            onOpen: { item in
+                withAnimation(.easeOut(duration: 0.18)) {
+                    viewModel.selectedItem = item
                 }
+            },
+            onToggle: { group in
+                viewModel.toggleCollapsed(for: group)
+            },
+            onPrefetch: { item, tier in
+                viewModel.prefetchThumbnails(around: item, tier: tier)
+            },
+            onVisibleSection: { groupID in
+                viewModel.updateTopSection(groupID)
+            },
+            onFastScrolling: { fast in
+                viewModel.setFastScrolling(fast)
+            },
+            onLoadMore: {
+                Task { await viewModel.loadMoreItems() }
             }
-            .padding(8)
-            .background(
-                ScrollActivityObserver { fast in
-                    viewModel.setFastScrolling(fast)
-                }
-            )
-            .onPreferenceChange(SectionFramePreferenceKey.self) { frames in
-                viewModel.updateTopSection(TimeFocusResolver.topSection(frames: frames))
-            }
-
-            if viewModel.canLoadMore {
-                ProgressView()
-                    .progressViewStyle(.circular)
-                    .frame(maxWidth: .infinity, minHeight: 60)
-                    .task(id: "\(viewModel.items.count)-\(viewModel.isFastScrolling)") {
-                        await viewModel.loadMoreItems()
-                    }
-            }
-        }
-        .coordinateSpace(name: "gridScroll")
-        .onChange(of: viewModel.scrollTarget) { target in
-            guard let target else { return }
-            DispatchQueue.main.async {
-                proxy.scrollTo(target.groupID, anchor: .top)
-            }
-        }
-        }
+        )
     }
 
     @ViewBuilder

@@ -5,9 +5,14 @@ import Foundation
 import ImageIO
 
 /// An already-decoded image handed across concurrency domains. The wrapped
-/// `NSImage` is created from an immutable `CGImage` and is never mutated.
+/// `CGImage` is immutable; `NSImage` is only a cheap view wrapper.
 struct ThumbnailImage: @unchecked Sendable {
-    let image: NSImage
+    let cgImage: CGImage
+
+    var image: NSImage {
+        NSImage(cgImage: cgImage,
+                size: NSSize(width: cgImage.width, height: cgImage.height))
+    }
 }
 
 struct ThumbnailInput: Sendable {
@@ -52,22 +57,42 @@ enum ThumbnailTier: String, Sendable, CaseIterable {
 final class ThumbnailGenerator: @unchecked Sendable {
     static let shared = ThumbnailGenerator()
 
-    private let gridCache = NSCache<NSString, NSImage>()
-    private let gridLargeCache = NSCache<NSString, NSImage>()
-    private let fullscreenCache = NSCache<NSString, NSImage>()
+    /// Grid images are the hot path for a 3,000-item library. The user-approved
+    /// budget keeps the 320 px layer resident instead of re-decoding on every
+    /// LazyVGrid/NSCollectionView cell reuse.
+    private static let defaultGridCacheBytes = 1024 * 1024 * 1024
+    private static let defaultLargeCacheBytes = 512 * 1024 * 1024
+    private static let defaultFullscreenCacheBytes = 512 * 1024 * 1024
+
+    private let gridCache: CGImageLRU
+    private let gridLargeCache: CGImageLRU
+    private let fullscreenCache: CGImageLRU
     private let stateLock = NSLock()
     private var inFlight: [String: Task<ThumbnailImage?, Never>] = [:]
+    private var hashCache: [String: String] = [:]
+    private var urlCache: [String: URL] = [:]
+    /// Bound disk reads and image decoding. Unbounded cell loads starve the
+    /// main thread (and the window server) even though each load is small.
+    private let loadGate = AsyncSemaphore(limit: 3)
 
     init() {
-        // 320 px bitmaps are ~0.3 MB decoded: 256 MB ≈ 850 images.
-        gridCache.countLimit = 2_000
-        gridCache.totalCostLimit = 256 * 1024 * 1024
-        // 640 px bitmaps are ~1.1 MB decoded: 192 MB ≈ 176 images.
-        gridLargeCache.countLimit = 512
-        gridLargeCache.totalCostLimit = 192 * 1024 * 1024
-        // 1024 px placeholders are ~3 MB decoded: 128 MB ≈ 42 images.
-        fullscreenCache.countLimit = 64
-        fullscreenCache.totalCostLimit = 128 * 1024 * 1024
+        let env = ProcessInfo.processInfo.environment
+        gridCache = CGImageLRU(capacityBytes: Self.cacheBytes(
+            env["MEDIAVIEWER_GRID_CACHE_MB"].flatMap(Int.init),
+            defaultMB: Self.defaultGridCacheBytes / 1024 / 1024
+        ))
+        gridLargeCache = CGImageLRU(capacityBytes: Self.cacheBytes(
+            env["MEDIAVIEWER_GRID_LARGE_CACHE_MB"].flatMap(Int.init),
+            defaultMB: Self.defaultLargeCacheBytes / 1024 / 1024
+        ))
+        fullscreenCache = CGImageLRU(capacityBytes: Self.cacheBytes(
+            env["MEDIAVIEWER_FULLSCREEN_CACHE_MB"].flatMap(Int.init),
+            defaultMB: Self.defaultFullscreenCacheBytes / 1024 / 1024
+        ))
+    }
+
+    private static func cacheBytes(_ mb: Int?, defaultMB: Int) -> Int {
+        max(mb ?? defaultMB, 16) * 1024 * 1024
     }
 
     /// Return a cached thumbnail if available; otherwise generate and cache it.
@@ -75,21 +100,24 @@ final class ThumbnailGenerator: @unchecked Sendable {
     func thumbnail(
         for input: ThumbnailInput,
         tier: ThumbnailTier = .grid,
-        rootURL: URL
+        rootURL: URL,
+        priority: TaskPriority = .userInitiated
     ) async -> ThumbnailImage? {
         guard let thumbnailURL = thumbnailURL(for: input, tier: tier, rootURL: rootURL) else { return nil }
 
-        let cacheKey = thumbnailURL.path as NSString
-        if let cached = cache(for: tier).object(forKey: cacheKey) {
-            return ThumbnailImage(image: cached)
+        let path = thumbnailURL.path
+        if let cached = cache(for: tier).image(forKey: path) {
+            return ThumbnailImage(cgImage: cached)
         }
 
-        let path = thumbnailURL.path
         if let existing = inFlightTask(for: path) {
             return await existing.value
         }
-        let task = Task.detached(priority: .userInitiated) { [self] in
-            await loadOrGenerate(input: input, tier: tier, rootURL: rootURL, thumbnailURL: thumbnailURL)
+        let task = Task.detached(priority: priority) { [self] in
+            await loadGate.wait()
+            let result = await loadOrGenerate(input: input, tier: tier, rootURL: rootURL, thumbnailURL: thumbnailURL)
+            await loadGate.signal()
+            return result
         }
         setInFlightTask(task, for: path)
 
@@ -122,27 +150,36 @@ final class ThumbnailGenerator: @unchecked Sendable {
         rootURL: URL,
         thumbnailURL: URL
     ) async -> ThumbnailImage? {
-        let cacheKey = thumbnailURL.path as NSString
-        if let cached = cache(for: tier).object(forKey: cacheKey) {
-            return ThumbnailImage(image: cached)
+        let cacheKey = thumbnailURL.path
+        if let cached = cache(for: tier).image(forKey: cacheKey) {
+            return ThumbnailImage(cgImage: cached)
         }
 
         let sourceURL = rootURL.appendingPathComponent(input.relativePath)
         if FileManager.default.fileExists(atPath: thumbnailURL.path) {
             if let image = loadDecodedThumbnail(at: thumbnailURL, tier: tier),
                isThumbnailAdequate(image, tier: tier, sourceURL: sourceURL) {
-                cache(for: tier).setObject(image, forKey: cacheKey, cost: image.cost)
-                return ThumbnailImage(image: image)
+                cache(for: tier).insert(image, forKey: cacheKey)
+                return ThumbnailImage(cgImage: image)
             }
         }
         guard FileManager.default.fileExists(atPath: sourceURL.path) else { return nil }
 
-        let image = await generateThumbnail(for: input, tier: tier, sourceURL: sourceURL)
-        if let image {
-            try? saveThumbnail(image, to: thumbnailURL, quality: tier.jpegQuality)
-            cache(for: tier).setObject(image, forKey: cacheKey, cost: image.cost)
+        guard let image = await generateThumbnail(for: input, tier: tier, sourceURL: sourceURL) else {
+            return nil
         }
-        return image.map(ThumbnailImage.init(image:))
+        try? saveThumbnail(image, to: thumbnailURL, quality: tier.jpegQuality)
+        cache(for: tier).insert(image, forKey: cacheKey)
+        return ThumbnailImage(cgImage: image)
+    }
+
+    /// Synchronous memory-cache probe for a collection-view cell. This avoids
+    /// spawning a Task for the common warm-cache case.
+    func cachedImage(for input: ThumbnailInput,
+                     tier: ThumbnailTier = .grid,
+                     rootURL: URL) -> CGImage? {
+        guard let url = thumbnailURL(for: input, tier: tier, rootURL: rootURL) else { return nil }
+        return cache(for: tier).image(forKey: url.path)
     }
 
     /// Remove every tier for a deleted/changed item.
@@ -183,29 +220,42 @@ final class ThumbnailGenerator: @unchecked Sendable {
         rootURL: URL
     ) -> NSImage? {
         guard let url = thumbnailURL(for: input, tier: tier, rootURL: rootURL) else { return nil }
-        let key = url.path as NSString
-        if let cached = cache(for: tier).object(forKey: key) {
-            return cached
+        let key = url.path
+        if let cached = cache(for: tier).image(forKey: key) {
+            return NSImage(cgImage: cached, size: NSSize(width: cached.width, height: cached.height))
         }
         let sourceURL = rootURL.appendingPathComponent(input.relativePath)
         guard FileManager.default.fileExists(atPath: url.path),
               let image = loadDecodedThumbnail(at: url, tier: tier),
               isThumbnailAdequate(image, tier: tier, sourceURL: sourceURL) else { return nil }
-        cache(for: tier).setObject(image, forKey: key, cost: image.cost)
-        return image
+        cache(for: tier).insert(image, forKey: key)
+        return NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
     }
 
     // MARK: - Internal
 
     func thumbnailURL(for input: ThumbnailInput, tier: ThumbnailTier = .grid, rootURL: URL) -> URL? {
+        let cacheKey = "\(rootURL.path)|\(input.relativePath)|\(input.modificationDate.timeIntervalSince1970)|\(tier.rawValue)"
+        stateLock.lock()
+        if let cached = urlCache[cacheKey] {
+            stateLock.unlock()
+            return cached
+        }
+        stateLock.unlock()
+
         let thumbsDir = PersistenceController.thumbnailsDirectory(for: rootURL)
         let hash = stableHash("\(input.relativePath)|\(input.modificationDate.timeIntervalSince1970)")
-        return thumbsDir.appendingPathComponent("\(hash)-\(tier.rawValue).jpg")
+        let url = thumbsDir.appendingPathComponent("\(hash)-\(tier.rawValue).jpg")
+
+        stateLock.lock()
+        urlCache[cacheKey] = url
+        stateLock.unlock()
+        return url
     }
 
     // MARK: - Private
 
-    private func cache(for tier: ThumbnailTier) -> NSCache<NSString, NSImage> {
+    private func cache(for tier: ThumbnailTier) -> CGImageLRU {
         switch tier {
         case .grid: return gridCache
         case .gridLarge: return gridLargeCache
@@ -214,7 +264,7 @@ final class ThumbnailGenerator: @unchecked Sendable {
     }
 
     /// Decode a cached JPEG off the caller's thread and return an already-decoded image.
-    private func loadDecodedThumbnail(at url: URL, tier: ThumbnailTier) -> NSImage? {
+    private func loadDecodedThumbnail(at url: URL, tier: ThumbnailTier) -> CGImage? {
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
         let options: [NSString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
@@ -223,13 +273,10 @@ final class ThumbnailGenerator: @unchecked Sendable {
             kCGImageSourceCreateThumbnailWithTransform: true,
             kCGImageSourceThumbnailMaxPixelSize: tier.maxPixelSize
         ]
-        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
-            return nil
-        }
-        return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
     }
 
-    private func generateThumbnail(for input: ThumbnailInput, tier: ThumbnailTier, sourceURL: URL) async -> NSImage? {
+    private func generateThumbnail(for input: ThumbnailInput, tier: ThumbnailTier, sourceURL: URL) async -> CGImage? {
         if input.mediaType == .photo {
             return generatePhotoThumbnail(from: sourceURL, tier: tier)
         } else {
@@ -238,12 +285,24 @@ final class ThumbnailGenerator: @unchecked Sendable {
     }
 
     private func stableHash(_ input: String) -> String {
+        stateLock.lock()
+        if let cached = hashCache[input] {
+            stateLock.unlock()
+            return cached
+        }
+        stateLock.unlock()
+
         let data = Data(input.utf8)
         let digest = SHA256.hash(data: data)
-        return digest.compactMap { String(format: "%02x", $0) }.joined()
+        let value = digest.compactMap { String(format: "%02x", $0) }.joined()
+
+        stateLock.lock()
+        hashCache[input] = value
+        stateLock.unlock()
+        return value
     }
 
-    private func generatePhotoThumbnail(from url: URL, tier: ThumbnailTier) -> NSImage? {
+    private func generatePhotoThumbnail(from url: URL, tier: ThumbnailTier) -> CGImage? {
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
 
         let target = tier.maxPixelSize
@@ -263,22 +322,19 @@ final class ThumbnailGenerator: @unchecked Sendable {
             options[kCGImageSourceCreateThumbnailFromImageIfAbsent] = true
             if let candidate = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary),
                max(candidate.width, candidate.height) >= target {
-                return NSImage(cgImage: candidate, size: NSSize(width: candidate.width, height: candidate.height))
+                return candidate
             }
             options[kCGImageSourceCreateThumbnailFromImageIfAbsent] = nil
         }
 
         options[kCGImageSourceCreateThumbnailFromImageAlways] = true
-        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
-            return nil
-        }
-        return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
     }
 
     /// A stored tier is reusable when it reaches the physical target, or when
     /// the source itself is smaller than the target (upscaling cannot add detail).
-    private func isThumbnailAdequate(_ image: NSImage, tier: ThumbnailTier, sourceURL: URL) -> Bool {
-        let longEdge = max(image.size.width, image.size.height)
+    private func isThumbnailAdequate(_ image: CGImage, tier: ThumbnailTier, sourceURL: URL) -> Bool {
+        let longEdge = CGFloat(max(image.width, image.height))
         let target = CGFloat(tier.maxPixelSize)
         guard longEdge < target else { return true }
         // Video sources cannot be inspected with ImageIO. Keep their existing
@@ -294,7 +350,7 @@ final class ThumbnailGenerator: @unchecked Sendable {
         return longEdge >= min(target, sourceLongEdge)
     }
 
-    private func generateVideoThumbnail(from url: URL, tier: ThumbnailTier) async -> NSImage? {
+    private func generateVideoThumbnail(from url: URL, tier: ThumbnailTier) async -> CGImage? {
         let asset = AVAsset(url: url)
         let generator = AVAssetImageGenerator(asset: asset)
         generator.appliesPreferredTrackTransform = true
@@ -304,29 +360,49 @@ final class ThumbnailGenerator: @unchecked Sendable {
             let duration = try await asset.load(.duration)
             let time = CMTime(seconds: duration.seconds * 0.5, preferredTimescale: 600)
             let (cgImage, _) = try await generator.image(at: time)
-            return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+            return cgImage
         } catch {
             Log.thumbnails.error("Failed to generate video thumbnail for \(url.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
             return nil
         }
     }
 
-    private func saveThumbnail(_ image: NSImage, to url: URL, quality: CGFloat) throws {
-        guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return }
-        let rep = NSBitmapImageRep(cgImage: cgImage)
-        rep.size = image.size
+    private func saveThumbnail(_ image: CGImage, to url: URL, quality: CGFloat) throws {
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                                                 withIntermediateDirectories: true,
+                                                 attributes: nil)
+        let rep = NSBitmapImageRep(cgImage: image)
         guard let data = rep.representation(using: .jpeg, properties: [.compressionFactor: quality]) else { return }
         try data.write(to: url)
     }
 }
 
-private extension NSImage {
-    /// Rough cost in bytes for NSCache accounting based on actual bitmap pixels.
-    var cost: Int {
-        let pixels = representations.reduce(0) { total, rep in
-            total + rep.pixelsWide * rep.pixelsHigh
+
+private actor AsyncSemaphore {
+    private let limit: Int
+    private var available: Int
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    init(limit: Int) {
+        self.limit = max(1, limit)
+        self.available = max(1, limit)
+    }
+
+    func wait() async {
+        if available > 0 {
+            available -= 1
+            return
         }
-        let bytesPerPixel = 4
-        return max(pixels * bytesPerPixel, 1)
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+    }
+
+    func signal() {
+        if waiters.isEmpty {
+            available = min(limit, available + 1)
+        } else {
+            waiters.removeFirst().resume()
+        }
     }
 }

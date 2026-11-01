@@ -134,12 +134,8 @@ final class PersistenceController {
     }
 
     static func thumbnailsDirectory(for rootURL: URL) -> URL {
-        let thumbsDir = rootURL
+        rootURL
             .appendingPathComponent(".mediaviewer", isDirectory: true)
             .appendingPathComponent("Thumbnails", isDirectory: true)
-        try? FileManager.default.createDirectory(at: thumbsDir,
-                                                  withIntermediateDirectories: true,
-                                                  attributes: nil)
-        return thumbsDir
     }
 }

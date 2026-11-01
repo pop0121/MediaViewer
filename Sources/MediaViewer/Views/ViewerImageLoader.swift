@@ -98,7 +98,6 @@ final class ViewerImageLoader: ObservableObject {
         guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
             return nil
         }
-        let image = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
-        return ThumbnailImage(image: image)
+        return ThumbnailImage(cgImage: cgImage)
     }
 }
