@@ -195,13 +195,23 @@ final class LibraryViewModel: ObservableObject {
 
     private func setupLibrary(for url: URL) async {
         do {
-            let storeURL = PersistenceController.storeURL(for: url)
-            persistence = try PersistenceController(storeURL: storeURL)
+            let opened = try url.withSecurityScope {
+                try PersistenceController.openForRoot(url)
+            }
+            persistence = opened.controller
+            Log.library.notice(
+                "Opened library root=\(url.path, privacy: .public) outcome=\(opened.outcome.rawValue, privacy: .public)"
+            )
             await performScan(rootURL: url)
         } catch is CancellationError {
             scanProgress = "Cancelled"
         } catch {
-            errorMessage = "Failed to open library: \(error.localizedDescription)"
+            let details = MediaErrorDescription.details(error, rootURL: url)
+            Log.scan.error("Failed to open library root=\(url.path, privacy: .public) \(details, privacy: .public)")
+            errorMessage = """
+            Failed to open library: \(details)
+            The index lives under Application Support; the media folder was not modified. Check Console for details.
+            """
         }
     }
 
@@ -235,12 +245,18 @@ final class LibraryViewModel: ObservableObject {
             let fetchInterval = Perf.begin("library.firstScreenFetch")
             await fetchItems()
             Perf.end(fetchInterval, "total=\(totalItemCount)")
+            Log.library.notice("First screen items=\(self.items.count) total=\(self.totalItemCount)")
             scanProgress = "Indexed \(result.processed) new/changed items, \(totalItemCount) total."
+            Log.library.notice(
+                "Scan complete root=\(rootURL.path, privacy: .public) processed=\(result.processed) total=\(self.totalItemCount)"
+            )
             startMaintenance(rootURL: rootURL)
         } catch is CancellationError {
             scanProgress = "Cancelled"
         } catch {
-            errorMessage = "Scan failed: \(error.localizedDescription)"
+            let details = MediaErrorDescription.details(error, rootURL: rootURL)
+            Log.scan.error("Scan failed root=\(rootURL.path, privacy: .public) \(details, privacy: .public)")
+            errorMessage = MediaErrorDescription.userMessage(error, rootURL: rootURL)
         }
     }
 
@@ -414,10 +430,12 @@ final class LibraryViewModel: ObservableObject {
         prefetchTask = Task.detached(priority: .utility) {
             for input in inputs {
                 if Task.isCancelled { return }
-                _ = await ThumbnailGenerator.shared.thumbnail(for: input,
+                _ = await rootURL.withSecurityScope {
+                    await ThumbnailGenerator.shared.thumbnail(for: input,
                                                              tier: tier,
                                                              rootURL: rootURL,
                                                              priority: .utility)
+                }
             }
         }
     }

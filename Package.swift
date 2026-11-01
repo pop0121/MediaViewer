@@ -8,6 +8,7 @@ let package = Package(
         .executable(name: "MediaViewer", targets: ["MediaViewer"])
     ],
     targets: [
-        .executableTarget(name: "MediaViewer")
+        .executableTarget(name: "MediaViewer"),
+        .testTarget(name: "MediaViewerTests", dependencies: ["MediaViewer"])
     ]
 )

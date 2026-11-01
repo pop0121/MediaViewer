@@ -163,6 +163,23 @@ final class ThumbnailGenerator: @unchecked Sendable {
                 return ThumbnailImage(cgImage: image)
             }
         }
+
+        // One-time lazy migration of a legacy APFS thumbnail. exFAT legacy
+        // thumbnails are deliberately not copied; they are regenerated.
+        let legacyLocations = MediaStorageLocations(rootURL: rootURL)
+        if let legacyURL = legacyLocations.legacyThumbnailURL(named: thumbnailURL.lastPathComponent),
+           let image = loadDecodedThumbnail(at: legacyURL, tier: tier),
+           isThumbnailAdequate(image, tier: tier, sourceURL: sourceURL) {
+            try? FileManager.default.createDirectory(
+                at: thumbnailURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true,
+                attributes: nil
+            )
+            try? FileManager.default.copyItem(at: legacyURL, to: thumbnailURL)
+            cache(for: tier).insert(image, forKey: cacheKey)
+            return ThumbnailImage(cgImage: image)
+        }
+
         guard FileManager.default.fileExists(atPath: sourceURL.path) else { return nil }
 
         guard let image = await generateThumbnail(for: input, tier: tier, sourceURL: sourceURL) else {

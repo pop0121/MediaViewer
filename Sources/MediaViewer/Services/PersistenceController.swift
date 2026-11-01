@@ -7,6 +7,11 @@ final class PersistenceController {
     let container: NSPersistentContainer
 
     init(storeURL: URL) throws {
+        try FileManager.default.createDirectory(
+            at: storeURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true,
+            attributes: nil
+        )
         container = NSPersistentContainer(name: PersistenceController.modelName,
                                           managedObjectModel: PersistenceController.makeModel())
         let description = NSPersistentStoreDescription(url: storeURL)
@@ -20,6 +25,10 @@ final class PersistenceController {
             loadError = error
         }
         if let loadError {
+            let nsError = loadError as NSError
+            Log.scan.error(
+                "Core Data store open failed path=\(storeURL.path, privacy: .public) domain=\(nsError.domain, privacy: .public) code=\(nsError.code) underlying=\(String(describing: nsError.userInfo[NSUnderlyingErrorKey]), privacy: .public)"
+            )
             throw loadError
         }
 
@@ -122,20 +131,13 @@ final class PersistenceController {
         return model
     }
 
-    /// Prepare the hidden `.mediaviewer` directory and return the SQLite URL.
+    /// New SQLite URL in Application Support. The legacy `.mediaviewer`
+    /// directory is intentionally not used for new writes.
     static func storeURL(for rootURL: URL) -> URL {
-        let storeDir = rootURL
-            .appendingPathComponent(".mediaviewer", isDirectory: true)
-            .appendingPathComponent("Store", isDirectory: true)
-        try? FileManager.default.createDirectory(at: storeDir,
-                                                  withIntermediateDirectories: true,
-                                                  attributes: nil)
-        return storeDir.appendingPathComponent("MediaViewer.sqlite")
+        MediaStorageLocations(rootURL: rootURL).storeURL
     }
 
     static func thumbnailsDirectory(for rootURL: URL) -> URL {
-        rootURL
-            .appendingPathComponent(".mediaviewer", isDirectory: true)
-            .appendingPathComponent("Thumbnails", isDirectory: true)
+        MediaStorageLocations(rootURL: rootURL).thumbnailsDirectory
     }
 }
