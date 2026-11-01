@@ -25,7 +25,10 @@ struct VideoPlayerView: NSViewRepresentable {
         player.replaceCurrentItem(with: item)
         context.coordinator.player = player
         context.coordinator.configure(item: item, url: url, enhancementEnabled: enhancementEnabled)
-        player.play()
+        // Do not call play() here. SwiftUI calls updateNSView immediately after
+        // makeNSView; starting playback before the view is installed races the
+        // AVPlayerController KVO setup and crashes when a finished video is
+        // followed by another video (macOS 14, custom videoComposition path).
 
         return playerView
     }
@@ -36,6 +39,11 @@ struct VideoPlayerView: NSViewRepresentable {
         // SwiftUI reuses the NSView across item changes, so the player must be
         // repointed explicitly; otherwise the previous video keeps playing.
         if coordinator.currentURL != url {
+            // Drop the previous item explicitly. Replacing an ended item that
+            // still carries a custom videoComposition can over-release its
+            // AVURLAsset during deallocation on macOS 14 (crash observed when
+            // switching from a finished video in the enhancement path).
+            coordinator.prepareForReplacement()
             let item = AVPlayerItem(url: url)
             coordinator.configure(item: item, url: url, enhancementEnabled: enhancementEnabled)
             coordinator.player?.replaceCurrentItem(with: item)
@@ -55,7 +63,17 @@ struct VideoPlayerView: NSViewRepresentable {
     }
 
     static func dismantleNSView(_ nsView: AVPlayerView, coordinator: Coordinator) {
-        coordinator.player?.pause()
+        coordinator.prepareForReplacement()
+        // AVPlayerView keeps KVO/MediaRemote observers tied to its player. If
+        // the view is discarded (the viewer uses .id(item.id), so every video
+        // switch creates a new AVPlayerView), drop both sides explicitly
+        // before deallocation.
+        nsView.player = nil
+        coordinator.player?.replaceCurrentItem(with: nil)
+        coordinator.player = nil
+        coordinator.currentItem = nil
+        coordinator.currentURL = nil
+        coordinator.appliedEnhancement = nil
     }
 
     func makeCoordinator() -> Coordinator {
@@ -77,6 +95,14 @@ struct VideoPlayerView: NSViewRepresentable {
             currentItem = item
             currentURL = url
             applyEnhancement(enhancementEnabled, url: url)
+        }
+
+        /// Clear the custom composition before AVPlayer replaces/releases the
+        /// ended item. Releasing an item with a live custom composition crashes
+        /// inside AVURLAsset deallocation on macOS 14.
+        func prepareForReplacement() {
+            player?.pause()
+            currentItem?.videoComposition = nil
         }
 
         func applyEnhancement(_ enabled: Bool, url: URL) {

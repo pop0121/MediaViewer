@@ -29,7 +29,12 @@ struct FullscreenViewerView: View {
 
             if let item = currentItem {
                 content(for: item)
-                    .id(item.id)
+                    // Do not recreate the AVPlayerView when moving between
+                    // videos. AVPlayerView deallocation after a finished item
+                    // crashes inside AVFoundation's MediaRemote/KVO teardown;
+                    // a stable id lets VideoPlayerView.updateNSView replace the
+                    // item on the existing player instead.
+                    .id(item.isPhoto ? AnyHashable(item.id) : AnyHashable("video-player"))
                     .scaleEffect(item.isPhoto ? scale : 1.0)
                     .offset(item.isPhoto ? offset : .zero)
                     .gesture(item.isPhoto ? magnificationGesture : nil)
