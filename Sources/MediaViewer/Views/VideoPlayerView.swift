@@ -65,11 +65,9 @@ struct VideoPlayerView: NSViewRepresentable {
     static func dismantleNSView(_ nsView: AVPlayerView, coordinator: Coordinator) {
         coordinator.prepareForReplacement()
         // AVPlayerView keeps KVO/MediaRemote observers tied to its player. If
-        // the view is discarded (the viewer uses .id(item.id), so every video
-        // switch creates a new AVPlayerView), drop both sides explicitly
-        // before deallocation.
+        // the view is discarded (for example when the viewer switches to a
+        // photo), drop both sides explicitly before deallocation.
         nsView.player = nil
-        coordinator.player?.replaceCurrentItem(with: nil)
         coordinator.player = nil
         coordinator.currentItem = nil
         coordinator.currentURL = nil
