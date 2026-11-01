@@ -206,7 +206,10 @@ final class LibraryViewModel: ObservableObject {
             let before = items.count
             await loadMoreItems()
             if items.count == before {
-                if isFastScrolling {
+                // A viewport page fetch may be in flight (isLoadingPage), or
+                // the user may be flinging. Wait for it instead of abandoning
+                // hydration; a real fetch error still stops the loop.
+                if isLoadingPage || isFastScrolling {
                     try? await Task.sleep(nanoseconds: 100_000_000)
                     continue
                 }
