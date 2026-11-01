@@ -5,8 +5,8 @@ A native macOS app for browsing photos and videos stored in a user-selected root
 ## Features
 
 - Choose a root folder on launch (stored with a security-scoped bookmark for relaunch).
-- Recursively scans for `.jpg`, `.jpeg`, `.mp4`, and `.mov` files.
-- Extracts creation date and GPS location metadata from EXIF and QuickTime metadata.
+- Recursively scans for `.jpg`, `.jpeg`, `.png`, `.gif`, `.webp`, `.mp4`, and `.mov` files.
+- Derives display dates by confidence: EXIF > QuickTime > filename patterns (WeChat/screenshot/camera/epoch) > older filesystem modification > filesystem creation. Source is shown in the viewer.
 - Displays media in a density-adjustable grid (0.5×–2.0×, AppStorage, ⌘−/⌘+)
   with pinned date section headers.
 - Time grouping is explicit: All / Years / Months / Days (default Months);
@@ -25,7 +25,7 @@ A native macOS app for browsing photos and videos stored in a user-selected root
 - Generates and caches tiered thumbnails (320px grid, 640px zoomed-out grid,
   1024px full-screen) and a metadata index in a hidden `.mediaviewer/` folder
   under the root path.
-- Media files are never modified.
+- Media files are never modified; derived dates and the source label live only in the app index.
 
 ## Requirements
 

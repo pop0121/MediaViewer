@@ -8,12 +8,20 @@ final class MediaItemEntity: NSManagedObject {
     @NSManaged var fileName: String
     @NSManaged var fileSize: Int64
     @NSManaged var contentModificationDate: Date
+    /// Legacy column kept for lightweight migration; new code uses derivedDate.
     @NSManaged var creationDate: Date?
+    @NSManaged var derivedDate: Date?
+    @NSManaged var dateSourceRaw: String?
     @NSManaged var latitude: Double
     @NSManaged var longitude: Double
     @NSManaged var locationName: String?
     @NSManaged var mediaTypeRaw: String
     @NSManaged var thumbnailPath: String?
+
+    var dateSource: MediaDateSource? {
+        get { dateSourceRaw.flatMap(MediaDateSource.init(rawValue:)) }
+        set { dateSourceRaw = newValue?.rawValue }
+    }
 
     var mediaType: MediaItem.MediaType {
         get { MediaItem.MediaType(rawValue: mediaTypeRaw) ?? .photo }
@@ -47,7 +55,8 @@ extension MediaItem {
             fileName: entity.fileName,
             fileSize: entity.fileSize,
             contentModificationDate: entity.contentModificationDate,
-            creationDate: entity.creationDate,
+            derivedDate: entity.derivedDate ?? entity.creationDate,
+            dateSource: entity.dateSource,
             coordinate: entity.coordinate,
             locationName: entity.locationName,
             mediaType: entity.mediaType,

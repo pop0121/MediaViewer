@@ -70,6 +70,16 @@ final class PersistenceController {
         creationDate.attributeType = .dateAttributeType
         creationDate.isOptional = true
 
+        let derivedDate = NSAttributeDescription()
+        derivedDate.name = "derivedDate"
+        derivedDate.attributeType = .dateAttributeType
+        derivedDate.isOptional = true
+
+        let dateSourceRaw = NSAttributeDescription()
+        dateSourceRaw.name = "dateSourceRaw"
+        dateSourceRaw.attributeType = .stringAttributeType
+        dateSourceRaw.isOptional = true
+
         let latitude = NSAttributeDescription()
         latitude.name = "latitude"
         latitude.attributeType = .doubleAttributeType
@@ -99,7 +109,7 @@ final class PersistenceController {
 
         itemEntity.properties = [
             relativePath, fileName, fileSize, contentModificationDate,
-            creationDate, latitude, longitude, locationName,
+            creationDate, derivedDate, dateSourceRaw, latitude, longitude, locationName,
             mediaTypeRaw, thumbnailPath
         ]
         itemEntity.uniquenessConstraints = [[relativePath]]

@@ -81,14 +81,19 @@ struct FullscreenViewerView: View {
                 }
                 Spacer()
 
-                if let item = currentItem, let date = item.formattedDate {
-                    Text(date)
-                        .font(.caption)
-                        .foregroundStyle(.white)
-                        .padding(8)
-                        .background(.ultraThinMaterial)
-                        .cornerRadius(8)
-                        .padding(.bottom, 16)
+                if let item = currentItem {
+                    VStack(spacing: 2) {
+                        Text(item.formattedDate ?? "时间未知")
+                            .font(.caption)
+                            .foregroundStyle(.white)
+                        Text(item.dateSource?.shortDescription ?? "时间来源未知")
+                            .font(.caption2)
+                            .foregroundStyle(.white.opacity(0.8))
+                    }
+                    .padding(8)
+                    .background(.ultraThinMaterial)
+                    .cornerRadius(8)
+                    .padding(.bottom, 16)
                 }
             }
 

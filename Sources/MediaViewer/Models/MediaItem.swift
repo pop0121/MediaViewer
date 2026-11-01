@@ -7,7 +7,10 @@ struct MediaItem: Identifiable {
     let fileName: String
     let fileSize: Int64
     let contentModificationDate: Date
-    let creationDate: Date?
+    /// Display/grouping date chosen by MediaDateSource priority.
+    let derivedDate: Date?
+    /// Where `derivedDate` came from; nil means Unknown Date.
+    let dateSource: MediaDateSource?
     let coordinate: CLLocationCoordinate2D?
     let locationName: String?
     let mediaType: MediaType
@@ -20,6 +23,9 @@ struct MediaItem: Identifiable {
 
     var isVideo: Bool { mediaType == .video }
     var isPhoto: Bool { mediaType == .photo }
+
+    /// Kept as a compatibility accessor for callers that used the old name.
+    var creationDate: Date? { derivedDate }
 
     enum MediaType: String, Hashable {
         case photo
@@ -50,11 +56,11 @@ extension MediaItem {
 
     /// A formatted creation date string for tooltips/overlays.
     var formattedDate: String? {
-        guard let creationDate else { return nil }
+        guard let derivedDate else { return nil }
         let formatter = DateFormatter()
         formatter.dateStyle = .medium
         formatter.timeStyle = .short
-        return formatter.string(from: creationDate)
+        return formatter.string(from: derivedDate)
     }
 
     /// Copy with an updated reverse-geocoded location name.
@@ -65,7 +71,8 @@ extension MediaItem {
             fileName: fileName,
             fileSize: fileSize,
             contentModificationDate: contentModificationDate,
-            creationDate: creationDate,
+            derivedDate: derivedDate,
+            dateSource: dateSource,
             coordinate: coordinate,
             locationName: name,
             mediaType: mediaType,

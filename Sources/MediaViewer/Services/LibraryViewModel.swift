@@ -49,6 +49,7 @@ final class LibraryViewModel: ObservableObject {
     private(set) var persistence: PersistenceController?
     private var cancellables = Set<AnyCancellable>()
     private let batchSize = 1000
+    private static let unknownDateGroupTitle = "未知时间"
     private var currentBatchOffset = 0
     private var isLoadingPage = false
     private var isLoadingAllItems = false
@@ -264,6 +265,14 @@ final class LibraryViewModel: ObservableObject {
 
         guard let persistence else { return }
 
+        // Publish the existing index before walking the filesystem. A full
+        // 40k+ media scan takes >60s; waiting for it to finish made the first
+        // screen take 14s. The scanner then merges new/changed rows into this
+        // snapshot while it runs, and fetchItems() refreshes it at the end.
+        let firstScreenInterval = Perf.begin("library.preScanFirstScreen")
+        await fetchItems()
+        Perf.end(firstScreenInterval, "items=\(items.count) total=\(totalItemCount)")
+
         do {
             let scanInterval = Perf.begin("scan.total")
             let result = try await rootURL.withSecurityScope {
@@ -314,7 +323,8 @@ final class LibraryViewModel: ObservableObject {
             if let index = indexByID[item.id] {
                 let existing = updated[index]
                 if existing.contentModificationDate != item.contentModificationDate
-                    || existing.creationDate != item.creationDate
+                    || existing.derivedDate != item.derivedDate
+                    || existing.dateSource != item.dateSource
                     || existing.locationName != item.locationName {
                     updated[index] = item
                     dateKeyCache.removeValue(forKey: item.id)
@@ -516,7 +526,7 @@ final class LibraryViewModel: ObservableObject {
         // made the first 1,000-row page a main-thread hitch when paging.
         let context = persistence.container.newBackgroundContext()
         let request = NSFetchRequest<MediaItemEntity>(entityName: "MediaItemEntity")
-        request.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+        request.sortDescriptors = [NSSortDescriptor(key: "derivedDate", ascending: false)]
         request.fetchOffset = offset
         request.fetchLimit = batchSize
 
@@ -802,8 +812,8 @@ final class LibraryViewModel: ObservableObject {
 
         var buckets: [String: [MediaItem]] = [:]
         for item in items {
-            guard let date = item.creationDate else {
-                buckets["Unknown Date", default: []].append(item)
+            guard let date = item.derivedDate else {
+                buckets[Self.unknownDateGroupTitle, default: []].append(item)
                 continue
             }
             let keys = dateKeys(for: item, date: date, calendar: calendar)
@@ -818,8 +828,8 @@ final class LibraryViewModel: ObservableObject {
         }
 
         let sortedKeys = buckets.keys.sorted { a, b in
-            if a == "Unknown Date" { return false }
-            if b == "Unknown Date" { return true }
+            if a == Self.unknownDateGroupTitle { return false }
+            if b == Self.unknownDateGroupTitle { return true }
             return a > b
         }
 

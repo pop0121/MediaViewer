@@ -99,6 +99,13 @@ final class MediaScanner {
         // Filter to only files whose modification date differs.
         let filesNeedingMetadata = changedFiles.filter { file in
             if let existing = itemsByPath[file.relativePath] {
+                // The batch-13 date-source migration needs one metadata pass
+                // over rows created before the source column existed. Rows
+                // processed as genuinely unknown carry the "unknown" sentinel
+                // and are not re-extracted on every launch.
+                if existing.dateSourceRaw == nil {
+                    return true
+                }
                 return existing.contentModificationDate != file.modificationDate
             }
             return true
@@ -200,7 +207,12 @@ final class MediaScanner {
                 entity.fileName = file.url.lastPathComponent
                 entity.fileSize = file.fileSize
                 entity.contentModificationDate = file.modificationDate
-                entity.creationDate = metadata.creationDate
+                entity.derivedDate = metadata.derivedDate
+                // A sentinel distinguishes "processed, no trustworthy date"
+                // from a row created before batch 13 (where dateSource is nil).
+                entity.dateSourceRaw = metadata.dateSource?.rawValue ?? "unknown"
+                // Keep the legacy column populated for older store readers.
+                entity.creationDate = metadata.derivedDate
                 entity.coordinate = metadata.coordinate
                 entity.mediaType = metadata.mediaType
                 entity.thumbnailPath = nil
@@ -226,7 +238,7 @@ final class MediaScanner {
 
     private static func isMediaFile(_ url: URL) -> Bool {
         let ext = url.pathExtension.lowercased()
-        return ["jpg", "jpeg", "mp4", "mov"].contains(ext)
+        return ["jpg", "jpeg", "png", "gif", "webp", "mp4", "mov"].contains(ext)
     }
 }
 

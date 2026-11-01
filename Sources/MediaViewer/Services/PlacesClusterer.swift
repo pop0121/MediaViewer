@@ -129,8 +129,8 @@ enum PlacesClusterer {
     /// three photos are returned as-is. These are the map card representatives.
     static func representatives(from items: [MediaItem], limit: Int = 3) -> [MediaItem] {
         let sorted = items.sorted { lhs, rhs in
-            let l = lhs.creationDate ?? .distantPast
-            let r = rhs.creationDate ?? .distantPast
+            let l = lhs.derivedDate ?? .distantPast
+            let r = rhs.derivedDate ?? .distantPast
             return l == r ? lhs.id < rhs.id : l < r
         }
         guard sorted.count > limit else { return sorted }
