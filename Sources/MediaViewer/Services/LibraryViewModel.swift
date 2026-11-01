@@ -50,6 +50,9 @@ final class LibraryViewModel: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     private let batchSize = 1000
     private var currentBatchOffset = 0
+    private var isLoadingPage = false
+    private var isLoadingAllItems = false
+    private var timelineHydrationTask: Task<Void, Never>?
 
     private var scanTask: Task<Void, Never>?
     private var maintenanceTask: Task<Void, Never>?
@@ -168,6 +171,8 @@ final class LibraryViewModel: ObservableObject {
         scanTask = nil
         maintenanceTask = nil
         prefetchTask = nil
+        timelineHydrationTask?.cancel()
+        timelineHydrationTask = nil
     }
 
     private func startScan(for url: URL) {
@@ -179,17 +184,50 @@ final class LibraryViewModel: ObservableObject {
         // Appending 1,000 rows while a fling is in flight would force a full
         // canvas rebuild mid-gesture. The canvas re-arms and retries after the
         // fling settles; the fetch itself runs on a private queue.
-        guard canLoadMore, !isFastScrolling else { return }
-        currentBatchOffset += batchSize
-        await fetchBatch(offset: currentBatchOffset)
+        guard canLoadMore, !isFastScrolling, !isLoadingPage else { return }
+        isLoadingPage = true
+        defer { isLoadingPage = false }
+        let nextOffset = currentBatchOffset + batchSize
+        guard let newItems = await fetchBatchItems(offset: nextOffset) else { return }
+        currentBatchOffset = nextOffset
+        items.append(contentsOf: newItems)
+        indexAppendedItems(from: items.count - newItems.count, to: items.count)
+        Log.library.notice("Loaded page offset=\(nextOffset) page=\(newItems.count) items=\(self.items.count) total=\(self.totalItemCount)")
     }
 
-    /// Load every page for the Places map. The grid stays paged; the map needs
-    /// all coordinates to cluster the full library.
+    /// Load every page. The grid stays paged for normal scrolling; the Places
+    /// map and the initial timeline hydration need the complete index so the
+    /// year/month section list is not limited to the first (newest) 1,000 rows.
     func loadAllItems() async {
-        guard !isScanning else { return }
+        guard !isScanning, !isLoadingAllItems else { return }
+        isLoadingAllItems = true
+        defer { isLoadingAllItems = false }
         while canLoadMore && !Task.isCancelled {
+            let before = items.count
             await loadMoreItems()
+            if items.count == before {
+                if isFastScrolling {
+                    try? await Task.sleep(nanoseconds: 100_000_000)
+                    continue
+                }
+                break
+            }
+        }
+        Log.library.notice("Timeline hydration complete items=\(self.items.count) total=\(self.totalItemCount)")
+    }
+
+    /// The first page is sorted newest-first; a library whose newest 1,000
+    /// rows are all in one year would otherwise look like it contains only
+    /// that year until the user manually reaches the very bottom. Hydrate the
+    /// rest in the background after the first screen is visible.
+    private func startTimelineHydration() {
+        guard items.count < totalItemCount else { return }
+        timelineHydrationTask?.cancel()
+        timelineHydrationTask = Task { [weak self] in
+            // Let performScan's defer clear isScanning first.
+            try? await Task.sleep(nanoseconds: 100_000_000)
+            guard !Task.isCancelled else { return }
+            await self?.loadAllItems()
         }
     }
 
@@ -251,6 +289,7 @@ final class LibraryViewModel: ObservableObject {
                 "Scan complete root=\(rootURL.path, privacy: .public) processed=\(result.processed) total=\(self.totalItemCount)"
             )
             startMaintenance(rootURL: rootURL)
+            startTimelineHydration()
         } catch is CancellationError {
             scanProgress = "Cancelled"
         } catch {
@@ -466,12 +505,6 @@ final class LibraryViewModel: ObservableObject {
         prefetchStartIndex = nil
         prefetchStartTier = nil
         rebuildIndices()
-    }
-
-    private func fetchBatch(offset: Int) async {
-        guard let newItems = await fetchBatchItems(offset: offset) else { return }
-        items.append(contentsOf: newItems)
-        indexAppendedItems(from: items.count - newItems.count, to: items.count)
     }
 
     private func fetchBatchItems(offset: Int) async -> [MediaItem]? {
