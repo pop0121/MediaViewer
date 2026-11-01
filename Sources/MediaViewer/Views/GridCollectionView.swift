@@ -202,9 +202,23 @@ final class GridCanvasView: NSView {
     private var tilePool: [GridTileLayer] = []
     private var tasks: [String: Task<Void, Never>] = [:]
     private var lastVisibleKeys: Set<String> = []
+    private var isFastScrolling = false
 
     var onOpen: ((MediaItem) -> Void)?
     var onPrefetch: ((MediaItem, ThumbnailTier) -> Void)?
+
+    /// While a fling is in progress, keep synchronous cache hits and skip disk
+    /// reads/decodes. The next visible update after the fling fills the blanks.
+    func setFastScrolling(_ fast: Bool) {
+        guard fast != isFastScrolling else { return }
+        isFastScrolling = fast
+        if fast {
+            for task in tasks.values { task.cancel() }
+            tasks.removeAll()
+        } else {
+            updateVisible(force: true)
+        }
+    }
 
     override var isFlipped: Bool { true }
 
@@ -305,6 +319,17 @@ final class GridCanvasView: NSView {
             let tile: GridTileLayer
             if let existing = tiles[key] {
                 existing.frame = rect
+                if existing.contents == nil, !isFastScrolling {
+                    let input = ThumbnailInput(relativePath: media.relativePath,
+                                               modificationDate: media.contentModificationDate,
+                                               mediaType: media.mediaType)
+                    if let rootURL,
+                       let cached = ThumbnailGenerator.shared.cachedImage(for: input, tier: tier, rootURL: rootURL) {
+                        existing.configure(image: cached, isVideo: media.isVideo)
+                    } else if let rootURL {
+                        loadImage(for: key, input: input, media: media, tile: existing)
+                    }
+                }
                 continue
             } else if let recycled = tilePool.popLast() {
                 tile = recycled
@@ -338,7 +363,7 @@ final class GridCanvasView: NSView {
                            input: ThumbnailInput,
                            media: MediaItem,
                            tile: GridTileLayer) {
-        guard tasks[key] == nil, let rootURL else { return }
+        guard !isFastScrolling, tasks[key] == nil, let rootURL else { return }
         let requestedTier = tier
         tasks[key] = Task { @MainActor [weak self] in
             let image = await rootURL.withSecurityScope {
@@ -617,6 +642,7 @@ final class GridContainerView: NSView {
     private func setFast(_ value: Bool) {
         guard value != isFast else { return }
         isFast = value
+        canvas.setFastScrolling(value)
         onFastScrolling?(value)
         if !value {
             // A fast fling skips paging; once it settles at the bottom, page in

@@ -58,6 +58,10 @@ final class LibraryViewModel: ObservableObject {
     private var prefetchStartIndex: Int?
     private var prefetchStartTier: ThumbnailTier?
     private var prefetchTier: ThumbnailTier = .grid
+    /// Normal browsing prefetches a broad window; a fling only needs the
+    /// visible row plus two screens of headroom.
+    private static let prefetchRadius = 48
+    private static let fastPrefetchRadius = 24
     /// Test/debug switch for measuring first-screen fill with and without the
     /// look-ahead prefetcher.
     var prefetchEnabled = true
@@ -172,6 +176,9 @@ final class LibraryViewModel: ObservableObject {
     }
 
     func loadMoreItems() async {
+        // Appending 1,000 rows while a fling is in flight would force a full
+        // canvas rebuild mid-gesture. The canvas re-arms and retries after the
+        // fling settles; the fetch itself runs on a private queue.
         guard canLoadMore, !isFastScrolling else { return }
         currentBatchOffset += batchSize
         await fetchBatch(offset: currentBatchOffset)
@@ -352,7 +359,11 @@ final class LibraryViewModel: ObservableObject {
             prefetchTask?.cancel()
             prefetchTask = nil
         } else if let anchor = prefetchAnchor {
-            startPrefetch(around: anchor, tier: prefetchTier)
+            // A fling only leaves a two-screen window warm. Once the user keeps
+            // browsing, the next visible cell widens the window to ±48.
+            startPrefetch(around: anchor,
+                          tier: prefetchTier,
+                          radius: Self.fastPrefetchRadius)
         }
     }
 
@@ -377,15 +388,19 @@ final class LibraryViewModel: ObservableObject {
         if prefetchStartTier == tier, let lastStart = prefetchStartIndex, abs(lastStart - index) < 8 {
             return
         }
-        startPrefetch(around: index, tier: tier)
+        startPrefetch(around: index,
+                      tier: tier,
+                      radius: Self.prefetchRadius)
     }
 
-    private func startPrefetch(around index: Int, tier: ThumbnailTier) {
+    private func startPrefetch(around index: Int,
+                               tier: ThumbnailTier,
+                               radius: Int) {
         guard let rootURL else { return }
         prefetchStartIndex = index
         prefetchStartTier = tier
-        let lower = max(0, index - 4)
-        let upper = min(items.count, index + 24)
+        let lower = max(0, index - radius)
+        let upper = min(items.count, index + radius + 1)
         guard lower < upper else { return }
         let inputs = items[lower..<upper].map {
             ThumbnailInput(
@@ -399,7 +414,10 @@ final class LibraryViewModel: ObservableObject {
         prefetchTask = Task.detached(priority: .utility) {
             for input in inputs {
                 if Task.isCancelled { return }
-                _ = await ThumbnailGenerator.shared.thumbnail(for: input, tier: tier, rootURL: rootURL)
+                _ = await ThumbnailGenerator.shared.thumbnail(for: input,
+                                                             tier: tier,
+                                                             rootURL: rootURL,
+                                                             priority: .utility)
             }
         }
     }
@@ -408,10 +426,7 @@ final class LibraryViewModel: ObservableObject {
         guard let persistence else { return }
         currentBatchOffset = 0
 
-        let context = persistence.container.viewContext
-        // Sibling background contexts wrote during the scan; drop cached
-        // objects so the reconciled fetch below sees the committed state.
-        context.reset()
+        let context = persistence.container.newBackgroundContext()
 
         let countRequest = NSFetchRequest<MediaItemEntity>(entityName: "MediaItemEntity")
         countRequest.resultType = .countResultType
@@ -443,17 +458,18 @@ final class LibraryViewModel: ObservableObject {
 
     private func fetchBatchItems(offset: Int) async -> [MediaItem]? {
         guard let persistence else { return nil }
-        let context = persistence.container.viewContext
+        // Fetch and convert on a private queue. Doing this on the view context
+        // made the first 1,000-row page a main-thread hitch when paging.
+        let context = persistence.container.newBackgroundContext()
         let request = NSFetchRequest<MediaItemEntity>(entityName: "MediaItemEntity")
         request.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
         request.fetchOffset = offset
         request.fetchLimit = batchSize
 
         do {
-            let entities = try await context.perform {
-                try context.fetch(request)
+            return try await context.perform {
+                try context.fetch(request).map(MediaItem.init(entity:))
             }
-            return entities.map(MediaItem.init(entity:))
         } catch {
             errorMessage = "Failed to load items: \(error.localizedDescription)"
             return nil
