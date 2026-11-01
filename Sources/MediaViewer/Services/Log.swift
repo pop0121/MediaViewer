@@ -9,6 +9,7 @@ enum Log {
     static let thumbnails = Logger(subsystem: subsystem, category: "thumbnails")
     static let geocode = Logger(subsystem: subsystem, category: "geocode")
     static let viewer = Logger(subsystem: subsystem, category: "viewer")
+    static let collapse = Logger(subsystem: subsystem, category: "collapse")
 }
 
 /// Timed intervals. Signposts are always emitted for Instruments; human-readable

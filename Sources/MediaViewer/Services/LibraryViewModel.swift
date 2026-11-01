@@ -719,6 +719,7 @@ final class LibraryViewModel: ObservableObject {
         } else {
             ids.insert(group.id)
         }
+        Log.collapse.notice("toggle mode=\(mode.rawValue, privacy: .public) id=\(group.id, privacy: .public) wasCollapsed=\(group.isCollapsed) nowCollapsed=\(ids.contains(group.id))")
         collapsedGroupIDsByMode[mode.rawValue] = ids
         saveCollapsedGroupIDs()
 
@@ -727,6 +728,7 @@ final class LibraryViewModel: ObservableObject {
             mode: mode,
             collapsedIDs: ids
         )
+        Log.collapse.notice("regroup count=\(self.groupedItems.count) collapsed=\(self.groupedItems.filter { $0.isCollapsed }.map(\.id).joined(separator: ","), privacy: .public)")
     }
 
     private func collapsedGroupIDs(for mode: GroupingMode) -> Set<String> {

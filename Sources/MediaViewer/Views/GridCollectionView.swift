@@ -146,6 +146,11 @@ struct GridCanvasLayout {
         }
         return nil
     }
+
+    func header(at point: CGPoint) -> Int? {
+        guard let section = sectionIndex(atY: point.y) else { return nil }
+        return sections[section].header.contains(point) ? section : nil
+    }
 }
 
 private final class GridTileLayer: CALayer {
@@ -191,8 +196,58 @@ private final class GridTileLayer: CALayer {
     }
 }
 
-/// The scrolling document. It contains only the visible tile layers; the
-/// pinned header lives above the scroll view in `GridContainerView`.
+private final class GridSectionHeaderLayer: CALayer {
+    private let title = CATextLayer()
+    private let count = CATextLayer()
+    private let chevron = CATextLayer()
+
+    override init() {
+        super.init()
+        backgroundColor = NSColor.controlBackgroundColor.cgColor
+        masksToBounds = true
+        let scale = NSScreen.main?.backingScaleFactor ?? 2
+        for text in [title, count, chevron] {
+            text.contentsScale = scale
+            text.alignmentMode = .left
+            addSublayer(text)
+        }
+        title.foregroundColor = NSColor.labelColor.cgColor
+        title.fontSize = 14
+        count.foregroundColor = NSColor.secondaryLabelColor.cgColor
+        count.fontSize = 11
+        chevron.foregroundColor = NSColor.secondaryLabelColor.cgColor
+        chevron.fontSize = 14
+        chevron.alignmentMode = .center
+    }
+
+    override init(layer: Any) {
+        super.init(layer: layer)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func configure(group: MediaGroup) {
+        title.string = group.title
+        count.string = group.isCollapsed ? "\(group.count)" : ""
+        chevron.string = group.isCollapsed ? "▸" : "▾"
+    }
+
+    override func layoutSublayers() {
+        super.layoutSublayers()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        chevron.frame = CGRect(x: 6, y: 6, width: 18, height: 18)
+        title.frame = CGRect(x: 28, y: 5, width: max(bounds.width - 72, 10), height: 20)
+        count.frame = CGRect(x: max(bounds.width - 42, 30), y: 8, width: 34, height: 14)
+        CATransaction.commit()
+    }
+}
+
+/// The scrolling document. It contains only the visible tile layers and
+/// inline section headers; the pinned header lives above the scroll view in
+/// `GridContainerView`.
 final class GridCanvasView: NSView {
     private(set) var layout = GridCanvasLayout(groups: [], width: 900, minimumItemWidth: 160)
     private var groups: [MediaGroup] = []
@@ -203,9 +258,13 @@ final class GridCanvasView: NSView {
     private var tasks: [String: Task<Void, Never>] = [:]
     private var lastVisibleKeys: Set<String> = []
     private var isFastScrolling = false
+    private var headers: [Int: GridSectionHeaderLayer] = [:]
+    private var headerPool: [GridSectionHeaderLayer] = []
+    private var lastHeaderSections: Set<Int> = []
 
     var onOpen: ((MediaItem) -> Void)?
     var onPrefetch: ((MediaItem, ThumbnailTier) -> Void)?
+    var onToggle: ((MediaGroup) -> Void)?
 
     /// While a fling is in progress, keep synchronous cache hits and skip disk
     /// reads/decodes. The next visible update after the fling fills the blanks.
@@ -275,6 +334,16 @@ final class GridCanvasView: NSView {
             return CGRect(x: 0, y: section.header.minY, width: layout.contentSize.width, height: section.height)
                 .intersects(visible)
         }
+        var headerSections = Set<Int>()
+        for section in sectionRange where layout.sections.indices.contains(section) {
+            let descriptor = layout.sections[section]
+            guard descriptor.header.intersects(visible) else { continue }
+            headerSections.insert(section)
+        }
+        if force || headerSections != lastHeaderSections {
+            updateHeaders(sections: headerSections)
+        }
+
         var keys: Set<String> = []
         var entries: [(String, Int, Int, CGRect)] = []
 
@@ -296,7 +365,7 @@ final class GridCanvasView: NSView {
             }
         }
 
-        guard force || keys != lastVisibleKeys else { return }
+        guard force || keys != lastVisibleKeys || headerSections != lastHeaderSections else { return }
         let newKeys = keys.subtracting(lastVisibleKeys)
         lastVisibleKeys = keys
 
@@ -359,6 +428,39 @@ final class GridCanvasView: NSView {
         CATransaction.commit()
     }
 
+    private func updateHeaders(sections: Set<Int>) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        for section in sections {
+            let descriptor = layout.sections[section]
+            let header: GridSectionHeaderLayer
+            if let existing = headers[section] {
+                header = existing
+            } else if let recycled = headerPool.popLast() {
+                header = recycled
+                header.isHidden = false
+                layer?.addSublayer(header)
+                headers[section] = header
+            } else {
+                header = GridSectionHeaderLayer()
+                layer?.addSublayer(header)
+                headers[section] = header
+            }
+            header.frame = descriptor.header
+            if groups.indices.contains(descriptor.groupIndex) {
+                header.configure(group: groups[descriptor.groupIndex])
+            }
+        }
+        let staleSections = headers.keys.filter { !sections.contains($0) }
+        for section in staleSections {
+            guard let header = headers.removeValue(forKey: section) else { continue }
+            header.isHidden = true
+            headerPool.append(header)
+        }
+        lastHeaderSections = sections
+        CATransaction.commit()
+    }
+
     private func loadImage(for key: String,
                            input: ThumbnailInput,
                            media: MediaItem,
@@ -381,6 +483,16 @@ final class GridCanvasView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
+        if let section = layout.header(at: point),
+           layout.sections.indices.contains(section) {
+            let descriptor = layout.sections[section]
+            if groups.indices.contains(descriptor.groupIndex) {
+                let group = groups[descriptor.groupIndex]
+                Log.collapse.notice("inline header hit section=\(section) id=\(group.id, privacy: .public)")
+                onToggle?(group)
+            }
+            return
+        }
         guard let hit = layout.item(at: point),
               layout.sections.indices.contains(hit.section) else { return }
         let descriptor = layout.sections[hit.section]
@@ -430,7 +542,16 @@ private final class GridPinnedHeaderView: NSView {
         count.frame = NSRect(x: max(bounds.width - 36, 0), y: 8, width: 30, height: 14)
     }
 
+    /// The title/count labels are `NSTextField`s. Without this override they
+    /// become the hit-test target for clicks on the group title and consume the
+    /// event, so `mouseDown` below never runs. Keep the whole header interactive.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard !isHidden, alphaValue > 0 else { return nil }
+        return frame.contains(point) ? self : nil
+    }
+
     override func mouseDown(with event: NSEvent) {
+        Log.collapse.notice("pinned header mouseDown title=\(self.title.stringValue, privacy: .public)")
         onToggle?()
     }
 }
@@ -448,7 +569,9 @@ final class GridContainerView: NSView {
     var onPrefetch: ((MediaItem, ThumbnailTier) -> Void)? {
         didSet { canvas.onPrefetch = onPrefetch }
     }
-    var onToggle: ((MediaGroup) -> Void)?
+    var onToggle: ((MediaGroup) -> Void)? {
+        didSet { canvas.onToggle = onToggle }
+    }
     var onVisibleSection: ((String?) -> Void)?
     var onFastScrolling: ((Bool) -> Void)?
     var onLoadMore: (() -> Void)?
@@ -475,6 +598,10 @@ final class GridContainerView: NSView {
         layer?.backgroundColor = NSColor.clear.cgColor
         scrollView.drawsBackground = false
         scrollView.hasVerticalScroller = true
+        // Overlay scrollers must not shrink the document width. A legacy
+        // scroller appearing after the first scroll changes the column count
+        // and makes every section height (and the scroll position) jump.
+        scrollView.scrollerStyle = .overlay
         scrollView.autohidesScrollers = true
         scrollView.borderType = .noBorder
         scrollView.contentView.postsBoundsChangedNotifications = true
@@ -495,6 +622,7 @@ final class GridContainerView: NSView {
                scrollTarget: TimeScrollTarget?,
                force: Bool) {
         let newSignature = Self.signature(for: groups)
+        let collapsedIDs = groups.filter { $0.isCollapsed }.map(\.id).joined(separator: ",")
         let geometryChanged = force || newSignature != signature
             || abs(self.minimumItemWidth - minimumItemWidth) > 0.5
             || lastTier != tier
@@ -504,12 +632,13 @@ final class GridContainerView: NSView {
         self.lastTier = tier
         self.lastRootPath = rootURL.path
         if geometryChanged {
+            Log.collapse.notice("apply geometryChanged force=\(force) collapsed=[\(collapsedIDs, privacy: .public)] groups=\(groups.count)")
             let anchor = force ? nil : topVisibleAnchor()
             signature = newSignature
             canvas.configure(groups: groups,
                              rootURL: rootURL,
                              tier: tier,
-                             width: max(scrollView.contentView.bounds.width, 1),
+                             width: max(scrollView.bounds.width, 1),
                              minimumItemWidth: minimumItemWidth)
             if force {
                 scrollView.contentView.scroll(to: .zero)
@@ -543,7 +672,7 @@ final class GridContainerView: NSView {
         super.layout()
         scrollView.frame = bounds
 
-        let width = scrollView.contentView.bounds.width
+        let width = scrollView.bounds.width
         if abs(width - lastLayoutWidth) > 0.5 {
             lastLayoutWidth = width
             canvas.rebuildLayout(width: width, minimumItemWidth: minimumItemWidth)
