@@ -18,7 +18,7 @@ A native macOS app for browsing photos and videos stored in a user-selected root
 - Shows determinate scan progress and allows cancelling; partial results are kept.
 - Click an item to open a full-window overlay viewer with animated transitions.
 - Navigate with arrow keys, close with `Esc`, toggle video play/pause with `Space`.
-- Videos autoplay muted in the viewer; switching media replaces the player item.
+- Videos autoplay with audio enabled in the viewer; switching media replaces the player item.
 - Grid and full-screen images are decoded off the main thread; the viewer shows a
   1024px placeholder, then a 2000px screen-sized decode, and decodes the native
   resolution only when zoomed past 1.4×.

@@ -16,7 +16,9 @@ struct VideoPlayerView: NSViewRepresentable {
         playerView.videoGravity = .resizeAspect
 
         let player = AVPlayer()
-        player.isMuted = true
+        // Audio is part of the media: keep the player unmuted. Batch 8
+        // diagnosed the "no sound" report to this line.
+        player.isMuted = false
         playerView.player = player
 
         let item = AVPlayerItem(url: url)

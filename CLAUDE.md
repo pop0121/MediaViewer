@@ -94,7 +94,7 @@ Concurrent requests for the same path are coalesced into one detached task; a ca
 
 ### Viewer
 
-`FullscreenViewerView` overlays the grid and supports arrow-key navigation, Escape to close, and Space to play/pause video. Key events are handled synchronously on the main actor. Photos show the 1024px placeholder immediately while the full-resolution image is decoded off the main thread with ImageIO (EXIF orientation applied); ±2 neighbour placeholders are prefetched. Videos use `VideoPlayerView` (an `NSViewRepresentable` wrapping `AVPlayerView`), autoplay muted, and replace their `AVPlayerItem` when the selected media changes.
+`FullscreenViewerView` overlays the grid and supports arrow-key navigation, Escape to close, and Space to play/pause video. Key events are handled synchronously on the main actor. Photos show the 1024px placeholder immediately while the full-resolution image is decoded off the main thread with ImageIO (EXIF orientation applied); ±2 neighbour placeholders are prefetched. Videos use `VideoPlayerView` (an `NSViewRepresentable` wrapping `AVPlayerView`), autoplay with audio enabled, and replace their `AVPlayerItem` when the selected media changes.
 
 `GalleryView` uses `LazyVGrid` with pinned section headers; the viewer opens/closes with a combined opacity/scale transition.
 
