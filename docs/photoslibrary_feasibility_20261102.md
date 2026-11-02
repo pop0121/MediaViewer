@@ -265,13 +265,175 @@ Apple 文档把它定义为“read-write access to the user’s Photos library�
 - [ ] 若目标库不是系统照片图库，验证 PhotoKit 是否只能访问系统库，决定是否只能走导出或直接读库。
 - [ ] 在目标库上验证 `ZASSET` 的 `ZDIRECTORY/ZFILENAME` 与实际 `originals` 文件一致，及 iCloud 未下载比例。
 
+## 9. 导出保真度（导出桥接 / PhotoKit）
+
+本节逐项回答：走导出桥接或 PhotoKit 时，除像素之外，Live Photo、人像深度、编辑调整、关键词/人脸/相册、iCloud 优化项能否保留。
+
+证据等级：目标主图库当前未挂载，**没有在主库上实际执行 Photos.app 导出**；Photos.app 行为以 Apple 官方导出文档、本机 HEIC 样本的 `exiftool` 结果、以及公开的第三方实测为依据；PhotoKit 行为以 macOS 14 SDK 的公开头文件和 Apple 文档为准。凡是依赖“实际主库导出”的细节，已明确标注为按官方文档/格式推断。
+
+### 9.1 总表
+
+| 信息/能力 | Photos.app「Export Unmodified Original」 | Photos.app 普通「Export」 | PhotoKit `PHAssetResourceManager` 原片下载 |
+|---|---|---|---|
+| 原始像素与原始格式 | **保留**（按导入原格式） | 重新编码为 JPEG/HEIC/TIFF/PNG，可能改变 | **保留**（`.photo`/`.video` 原始资源字节） |
+| EXIF/拍摄时间/GPS | 保留（原文件内） | 多数保留；可能重写/缺字段 | 保留（原文件内） |
+| Live Photo 照片+视频 | **保留为两个文件**（still + video） | 可导出为静图；配对视频不随普通导出保留 | `.photo` + `.pairedVideo` 两个资源；需自己成对写出 |
+| Live Photo 配对元数据 | 保留在文件内（content identifier） | 静图导出后丢失配对 | 保留（原字节），前提是照片/视频都导出 |
+| 深度图/Portrait Effects Matte | **保留在原始 HEIC 的 auxiliary image 中** | **不保证**；JPEG/PNG/TIFF 明确没有；重编码 HEIC 也可能丢 | `.photo` 原始 HEIC 中保留；若取 `.fullSizePhoto` 渲染版则不保证 |
+| 原始 Portrait 参数 | 保留原始拍摄参数（如 `SimulatedAperture`、`RenderingParameters`）；用户后期改动不保留 | 效果烘焙进像素；参数丢失 | 原图参数保留；后期参数只在私有 `adjustmentData` |
+| 用户编辑（裁剪/曝光/滤镜/人像虚化调整） | **丢失**（回到未修改原图） | 结果保留，参数丢失 | 原图与 `fullSize`/`adjustmentData` 二选一；不能标准重放 |
+| 关键词 | 可选「Export IPTC as XMP」→ 侧车 XMP；不勾选则丢失 | 通常丢失/无侧车 | **无公开 keyword API**；不能从 PhotoKit 直接取得 |
+| 人脸/人物 | 丢失 | 丢失 | 无公开人脸框/人物名 API；不能完整导出 |
+| 相册/文件夹结构 | 丢失；最多用 Subfolder Format 命名，不是相册关系 | 丢失 | 可枚举 `PHAssetCollection`/`PHCollectionList`，需自己写 sidecar 重建 |
+| iCloud 未下载原片 | Photos 需按需下载；离线/失败则缺失 | 同左 | 需显式 `networkAccessAllowed=true`；否则可能失败/只给本地 |
+
+### 9.2 Live Photo
+
+#### Photos.app 未修改导出
+
+Apple 支持文档明确：**「Export Unmodified Original」把 Live Photo 导出为两个独立文件：一个静态图文件和一个视频文件**（[Apple Support](https://support.apple.com/guide/photos/export-photos-videos-slideshows-and-memories-pht6e157c5f/mac)）。
+
+- 形态：通常是 `IMG_xxxx.HEIC`（或 `.JPG`）+ `IMG_xxxx.MOV`；不是单个 `.livephoto` 包。
+- 配对：静态图的 MakerApple/MakerNote 与视频的 QuickTime `com.apple.quicktime.content.identifier` 共享 content identifier；这是两张文件重新组成 Live Photo 的依据。
+- 保留：照片/视频原始字节、拍摄时间、GPS、原始格式、原始深度/auxiliary image；**用户对 Live Photo 的编辑不保留**（原片导出）。
+- 若在普通「Export」里选择把 Live Photo 作为静图导出，配对视频与动态部分丢失；这是普通导出与未修改导出的关键差异。
+
+#### PhotoKit 原片下载
+
+- `PHAssetResource.assetResources(for:)` 对 Live Photo 返回构成它的资源；Apple 文档说明可用这些资源重新构造 `PHLivePhoto`。资源类型里：
+  - `.photo`：原始照片数据；
+  - `.pairedVideo`：原始 Live Photo 视频分量；
+  - `.fullSizePhoto` / `.fullSizePairedVideo`：当前渲染输出（有编辑时）。
+- 通过 `PHAssetResourceManager` 分别写出 `.photo` + `.pairedVideo`，即可保留**两个原始文件及其配对元数据**；PhotoKit 不会自动生成一个“Live Photo 包”，也不会自动附带相册/关键词。
+- 若只写 `.photo`，得到静图；若只写 `.fullSizePhoto`，得到渲染后的当前图，原始视频分量（或原始深度）不保证；不能把 `PHLivePhoto` 对象本身当作可落盘的单文件。
+- `PHAssetResourceRequestOptions.networkAccessAllowed` 必须显式开启，才能处理 iCloud 未下载的配对资源；否则可能只拿到本地资源或失败。
+
+### 9.3 人像深度、背景虚化与效果参数
+
+#### 实测样本
+
+本机没有用户主图库，但本机模拟器自带一张 iPhone X 人像 HEIC 样本。用 `exiftool` 读取到：
+
+```text
+FileType = HEIC
+ImageWidth/Height = 4032 x 3024
+AuxiliaryImageType = urn:mpeg:hevc:2015:auxid:2
+auxiliary image dimensions = 768 x 576
+XMP-depthData.Accuracy = relative
+XMP-apdi.AuxiliaryImageType = disparity
+XMP-apdi.NativeFormat = hdis
+XMP-apdi.StoredFormat = L008
+XMP-depthBlurEffect.SimulatedAperture = 4.5
+XMP-depthBlurEffect.RenderingParameters = <base64 blob>
+```
+
+这说明：
+
+- **深度图确实在 HEIC 内**，以 HEIF auxiliary image（`auxid:2`）存在；不是单独的外部文件。
+- 原始 HEIC 还有 Apple 私有 XMP：`depthData`、`apdi`（disparity）、`depthBlurEffect`（模拟光圈、渲染参数）。`SimulatedAperture=4.5` 是拍摄/原始效果参数。
+- 样本没有 `PortraitEffectsMatte`（肖像效果蒙版）；Apple 文档说明 iOS 12+ 的 Portrait 照片可能另含一张辅助 matte（`AVPortraitEffectsMatte`），用于提高发丝等细节；不是所有旧机型/照片都有。
+- 因此“原片导出”是否保留 depth，取决于是否导出**原始 HEIC 字节**；转成 JPEG 或重新渲染后就不再保证。
+
+#### 标准判断：不是 CIPA DC-X006
+
+需要纠正一个前提：**CIPA DC-006 是「Stereo Still Image Format for Digital Cameras」立体静态图像格式，不是单张照片 depth map 标准**。CIPA 相关标准中：
+
+- CIPA DC-006：Stereo Still Image Format（立体静态图像）；
+- CIPA DC-007：Multi-Picture Format（MPF）；
+- CIPA DC-010：Exif metadata for XMP。
+
+Apple 的 HEIC 人像 depth/matte 属于 **HEIF auxiliary image**（ISO/IEC 23008-12 图像容器能力）+ Apple 私有 XMP 命名空间；不能称为“已经是 CIPA DC-X006 标准”。它也不是 Google 的 `GDepth` XMP 标准。因此：
+
+- **容器层**：HEIC 的 auxiliary image 是标准 HEIF 能力，能被支持 HEIF 的工具提取；
+- **元数据层**：`depthData`/`apdi`/`depthBlurEffect` 是 Apple 扩展，第三方可读但不保证跨平台/跨版本；
+- **效果参数层**：`RenderingParameters` 是 Apple 的私有渲染参数，不是公开可重放的 CIPA/XMP 标准。
+
+#### 三种导出路径的保留情况
+
+1. **Photos.app Unmodified Original**
+   - 原 HEIC 中的 depth map、matte、`depthBlurEffect`/`SimulatedAperture` 随原始文件保留。
+   - 用户在 Photos 里改过的人像光圈/景深/焦点/滤镜**不保留**；导出的是原始拍摄版本。
+   - 重新导入 Photos 后，Portrait 效果通常不会自动启用；原始光圈/焦点参数仍可用于重新开启/调整（第三方实测文章也描述了这个行为）。
+
+2. **Photos.app 普通 Export**
+   - 结果是把编辑/效果**渲染成新像素**；JPEG/PNG/TIFF 一定没有 depth map/matte。
+   - 即使选 HEIC，也没有“保留 auxiliary depth”的承诺；它是重新编码的展示版本，不能作为 depth/Portrait 参数的保真备份。
+   - 因此：**要保留可重编辑的深度，必须用 Unmodified Original，而不是普通 Export。**
+
+3. **PhotoKit 原片下载**
+   - `.photo` 原始资源是 HEIC 字节，depth/matte 仍在；`PHAssetResourceManager` 原样写出即可保留。
+   - `.fullSizePhoto` 是当前编辑后的渲染版本，可能已丢失 depth/auxiliary 结构；不要用它做“可重编辑深度”的备份。
+   - 原始效果参数（`SimulatedAperture` 等）可读；**用户后期效果强度/焦点**只能通过 `adjustmentData`（私有 blob）或渲染后的 `fullSizePhoto` 取得，公开 API 不提供“重放 Apple 人像渲染”的能力。第三方可以用 depth 自己实现 bokeh，但无法保证与 Photos 完全一致。
+
+### 9.4 编辑调整、关键词/人脸/相册、iCloud
+
+| 项 | 未修改导出 | 普通导出 | PhotoKit |
+|---|---|---|---|
+| 裁剪、曝光、颜色、滤镜、修复 | **丢失**，回到原图 | **像素保留**，参数丢失 | `.photo` 原图；`.fullSizePhoto` 当前渲染；`.adjustmentData` 私有参数 |
+| 人像光圈/景深/焦点调整 | **丢失**（保留原始参数） | 结果烘焙；参数丢失 | 原图/当前渲染二选一；参数在私有 adjustment data |
+| RAW/HEIC 原始格式 | 保留 | 可能转码 | `.photo` 原资源保留 |
+| 关键词 | 可选 XMP 侧车；不勾选丢失 | 通常丢失 | **无公开 keyword API**；需外部 sidecar/导出工具 |
+| 人脸/人物 | 丢失 | 丢失 | **无公开人脸/人物元数据 API**；不能靠 PhotoKit 还原 |
+| 相册/文件夹 | 丢失（文件名/子目录不等于相册关系） | 丢失 | 可枚举 regular album/folder 并自行写 sidecar；smart album 只能近似 |
+| 收藏/隐藏/拍摄时间/GPS | 部分在文件；收藏/隐藏不在文件 | 部分；收藏/隐藏丢失 | `favorite`/`hidden`/`creationDate`/`location` 可读，需 sidecar |
+| iCloud 未下载 | Photos 按需下载；离线缺失 | 同左 | 需 `networkAccessAllowed=true`；否则失败/只本地 |
+| 编辑历史 | 丢失 | 丢失 | `adjustmentData` 可保存原始 blob，但不能标准重放；`adjustmentFormatIdentifier` 只标识格式 |
+
+#### 关键词
+
+- Photos 的「Export Unmodified Original」有 **Export IPTC as XMP** 选项；勾选后，assigned IPTC metadata/keywords 会写成同名 `.xmp` 侧车文件（Apple 支持文档明确列出）。不勾选则关键词不随文件走。
+- 普通 Export 不保证关键词侧车；图片本身通常不写 Photos 关键词。
+- PhotoKit 公开头文件没有 `PHAsset.keywords`；没有公开 keyword 资源类型。要保留关键词，必须依赖导出侧车或第三方导出工具的 sidecar；不要指望 `PHAssetResource`。
+
+#### 人脸/人物
+
+- Photos.app 未修改/普通导出都不导出人脸框、人物名、人物关系。
+- PhotoKit 公开 API 没有 `PHAsset` 人脸/人物属性；`PHCollectionListSubtypeSmartFolderFaces` 等集合类型不能提供可靠的人脸框/姓名数据。`AlbumSyncedFaces` 是旧式同步相册，不是现代“人物”识别结果。
+- 因此：**人脸/人物在两条路线都视为丢失**；若产品需要，必须另建 sidecar/索引，不能从导出文件恢复。
+
+#### 相册结构
+
+- Photos.app 导出只有文件/子目录命名（Subfolder Format），**不携带相册成员关系、相册顺序、智能相册定义**；同名文件夹不等于可逆的相册结构。
+- PhotoKit 可枚举 `PHAssetCollection`（regular albums、smart albums）和 `PHCollectionList`（folders），能读取标题/类型/成员；但需要应用自己写 sidecar 或目标目录结构。智能相册（如“人像”“Live Photo”“最近项目”）可以用 subtype 识别，不能保证重建其动态规则。
+- 结论：相册需要 **应用层 sidecar**，不是“导出件自带”。
+
+#### iCloud 优化项
+
+- 直接复制 `.photoslibrary` 目录只得到本地已有的 `originals/` 文件；`Photos.sqlite` 里可能有资产行，但 iCloud-only 原片不在本地。
+- `PHAssetResourceManager` 在 `networkAccessAllowed=true` 时可下载原片/配对视频；否则只处理本地资源，可能报错或返回不完整。
+- Photos.app 的导出会按需从 iCloud 取原片；离线、未登录或下载失败时，该项无法完整导出。导出桥接应逐个检查“文件是否实际存在/是否完整”，不能把数据库行当作已导出。
+- 元数据（日期/GPS/相册）可能已在 DB 中，但**没有像素**；对 MediaViewer 而言应标记“iCloud 未下载/缺失”，而不是生成空缩略图。
+
+### 9.5 对 MediaViewer 的直接结论
+
+1. **导出桥接的保真上限**：`Export Unmodified Original` + 勾选 `Export IPTC as XMP` + 保留 `.xmp` 侧车，能保住原片、EXIF/GPS、Live Photo 两文件和 depth；但**编辑参数、人脸/人物、相册关系仍会丢失**，需要应用自己补 sidecar。
+2. **普通 Export 只能作为“成品图”来源**：可保住编辑后的像素和构图，但 depth、Live 配对、原始参数、关键词都不应假定保留。
+3. **PhotoKit 是官方路线，但不是万能导出器**：`PHAssetResource` 能拿到原始 `.photo`/`.pairedVideo`/`.adjustmentData`，适合做保真导出；`PHPhotoLibrary` 不提供关键词/人脸/人物 API，相册需要应用枚举并写 sidecar；iCloud 要显式允许网络。
+4. **人像可重编辑性**：原片 HEIC 的 depth/matte 可以保留；Photos 自己的人像效果参数不是公开标准，第三方只能保留 blob 或用 depth 自行渲染，不能保证与 Photos 的最终虚化完全一致。
+5. **标准表述**：不要把 HEIC depth 说成 CIPA DC-X006；它是 HEIF auxiliary image + Apple 私有 XMP。若产品文档承诺“标准 depth”，需要改为“Apple HEIC depth，按原片字节保留”。
+
 ## 参考
 
 - Apple：Photos Library Entitlement（`com.apple.security.personal-information.photos-library`）  
   https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.security.personal-information.photos-library
 - Apple：`NSPhotoLibraryUsageDescription`  
   https://developer.apple.com/documentation/bundleresources/information-property-list/nsphotolibraryusagedescription
-- Apple：PhotoKit / `PHPhotoLibrary`、`PHImageManager`、`PHAssetResourceManager`
+- Apple：Export photos, videos, slideshows, and memories on Mac（含 Live Photo 两个文件、IPTC as XMP）
+  https://support.apple.com/guide/photos/export-photos-videos-slideshows-and-memories-pht6e157c5f/mac
+- Apple：`PHAssetResourceType`（`.photo`、`.pairedVideo`、`.fullSizePhoto`、`.adjustmentData` 等）
+  https://developer.apple.com/documentation/photos/phassetresourcetype
+- Apple：`assetResources(for: PHLivePhoto)`（用底层资源重建 Live Photo）
+  https://developer.apple.com/documentation/photos/phassetresource/assetresources(for:)-2fedw
+- Apple：`PHAssetResourceManager`
+  https://developer.apple.com/documentation/photos/phassetresourcemanager
+- Apple：`PHImageRequestOptionsVersionCurrent` / `.original`（当前渲染 vs 原图）
+  https://developer.apple.com/documentation/photos/phimagerequestoptions/version
+- Apple：`AVPortraitEffectsMatte`（iOS 12+ 的肖像效果蒙版；与 depth map 不同）
+  https://developer.apple.com/documentation/avfoundation/avportraiteffectsmatte
+- CIPA：Standards List（DC-006 是 Stereo Still Image Format；DC-007 MPF；DC-010 Exif XMP）
+  https://www.cipa.jp/e/std/std-sec.html
+- 第三方实测：Export Unmodified Original 保留 depth，但丢失编辑；重新导入后 Portrait 效果需重新开启
+  https://j3soon.com/posts/preserve-iphone-depth-data-when-exporting/
 - osxphotos（直接读库的成熟第三方实现，需 FDA）  
   https://github.com/RhetTbull/osxphotos
 - Duplicati 社区：macOS Photos Library 访问拒绝与 FDA 实测  
