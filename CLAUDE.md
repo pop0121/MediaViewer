@@ -37,7 +37,7 @@ Run tests:
 swift test
 ```
 
-> Currently no test target exists; `swift test` reports "no tests found". The `Package.swift` has a single executable target.
+The `MediaViewerTests` target covers the grouping/collapse matrix and the vivo album importer.
 
 ## High-Level Architecture
 
@@ -57,7 +57,7 @@ swift test
 
 ### Filesystem Access
 
-The app relies on security-scoped bookmarks. `BookmarkStore` saves/loads the bookmark for the root folder in `UserDefaults`. Most file access is wrapped in `URL.withSecurityScope`.
+The app relies on security-scoped bookmarks. `BookmarkStore` saves/loads the bookmark for the root folder in `UserDefaults`. Most file access is wrapped in `URL.withSecurityScope`. Security-scoped bookmarks are bound to the creating binary's signing identity, so `BookmarkStore` falls back to `.withoutUI` resolution when scoped resolution fails — dev builds run via `swift run` resolve bookmarks created by the bundled `.app` (and vice versa) this way; inside the sandbox both fail and the user re-picks the folder.
 
 ### Persistence
 
@@ -97,6 +97,15 @@ Concurrent requests for the same path are coalesced into one detached task; a ca
 `FullscreenViewerView` overlays the grid and supports arrow-key navigation, Escape to close, and Space to play/pause video. Key events are handled synchronously on the main actor. Photos show the 1024px placeholder immediately while the full-resolution image is decoded off the main thread with ImageIO (EXIF orientation applied); ±2 neighbour placeholders are prefetched. Videos use `VideoPlayerView` (an `NSViewRepresentable` wrapping `AVPlayerView`), autoplay with audio enabled, and replace their `AVPlayerItem` when the selected media changes.
 
 `GalleryView` uses `LazyVGrid` with pinned section headers; the viewer opens/closes with a combined opacity/scale transition.
+
+### Albums
+
+`MediaItem.albumNames` combines two sources:
+
+- **Folder albums**: the item's parent directory relative to the library root, derived at read time from `relativePath` and never stored.
+- **vivo-imported albums**: `VivoAlbumImporter` reads vivo 办公套件 (pcsuite)'s transfer log `~/Library/Application Support/pcsuite/database/TransferRecord.db` (opened read-only via SQLite3 with `immutable=1`), matches `savePath` against the indexed files, and stores the album (parent directory of the phone-side `phonePath`) as JSON in the optional `albumNamesRaw` column on `MediaItemEntity`. The importer owns that column wholesale and is idempotent. It runs automatically after each scan and from the sidebar button; sandboxed builds can be granted access via a security-scoped bookmark to `TransferRecord.db`. Only files transferred through the suite have records; a flattened export leaves nothing to recover.
+
+The gallery is a `NavigationSplitView`: `AlbumSidebarView` lists albums (name + loaded count, sorted by count) and filters the grid/map via `LibraryViewModel.selectedAlbum`, independent of the date/location grouping mode.
 
 ### Observability
 
