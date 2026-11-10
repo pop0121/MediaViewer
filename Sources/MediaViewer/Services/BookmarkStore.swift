@@ -33,6 +33,17 @@ final class BookmarkStore {
             }
             return url
         } catch {
+            // Security-scoped bookmarks are bound to the signing identity that
+            // created them. A dev binary (`swift run`, ad-hoc cdhash different
+            // from the bundled app's) cannot resolve another build's scoped
+            // bookmark; fall back to a plain resolution, which still yields a
+            // usable URL outside the app sandbox.
+            if let url = try? URL(resolvingBookmarkData: bookmark,
+                                  options: .withoutUI,
+                                  relativeTo: nil,
+                                  bookmarkDataIsStale: &isStale) {
+                return url
+            }
             throw BookmarkStoreError.failedToResolve(error)
         }
     }

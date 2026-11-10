@@ -21,7 +21,8 @@ final class CollapseMatrixTests: XCTestCase {
         let date = calendar.date(from: DateComponents(year: year, month: month, day: day, hour: index % 24))!
         return MediaItem(id: "i\(index)", relativePath: "m/i\(index).jpg", fileName: "i\(index).jpg",
                          fileSize: 1, contentModificationDate: date, derivedDate: date, dateSource: .filename,
-                         coordinate: nil, locationName: nil, mediaType: .photo, thumbnailPath: nil)
+                         coordinate: nil, locationName: nil, mediaType: .photo, thumbnailPath: nil,
+                         albumNames: [])
     }
 
     private func items() -> [MediaItem] {
