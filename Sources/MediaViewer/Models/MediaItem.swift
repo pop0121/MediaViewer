@@ -15,6 +15,10 @@ struct MediaItem: Identifiable {
     let locationName: String?
     let mediaType: MediaType
     let thumbnailPath: String?
+    /// All albums the item belongs to: the containing folder (first, if any)
+    /// plus vivo-imported album names. Empty for files at the library root
+    /// that were never matched by the vivo importer.
+    let albumNames: [String]
 
     var url: URL? {
         // Resolved lazily against the current root URL by the caller.
@@ -26,6 +30,29 @@ struct MediaItem: Identifiable {
 
     /// Kept as a compatibility accessor for callers that used the old name.
     var creationDate: Date? { derivedDate }
+
+    /// The folder album: the parent directory of the item relative to the
+    /// library root. Root-level files have no folder album.
+    static func folderAlbumName(relativePath: String) -> String? {
+        let parent = (relativePath as NSString).deletingLastPathComponent
+        return parent.isEmpty || parent == "." ? nil : parent
+    }
+
+    /// Folder album first, then stored (vivo) names, deduplicated, stored
+    /// names sorted for a stable display order.
+    static func combiningAlbums(folder: String?, stored: [String]) -> [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+        if let folder, !folder.isEmpty, seen.insert(folder).inserted {
+            result.append(folder)
+        }
+        for name in stored.sorted() where !name.isEmpty {
+            if seen.insert(name).inserted {
+                result.append(name)
+            }
+        }
+        return result
+    }
 
     enum MediaType: String, Hashable {
         case photo
@@ -76,7 +103,27 @@ extension MediaItem {
             coordinate: coordinate,
             locationName: name,
             mediaType: mediaType,
-            thumbnailPath: thumbnailPath
+            thumbnailPath: thumbnailPath,
+            albumNames: albumNames
+        )
+    }
+
+    /// Copy with vivo-imported album names re-combined with the folder album.
+    func withImportedAlbumNames(_ stored: [String]) -> MediaItem {
+        MediaItem(
+            id: id,
+            relativePath: relativePath,
+            fileName: fileName,
+            fileSize: fileSize,
+            contentModificationDate: contentModificationDate,
+            derivedDate: derivedDate,
+            dateSource: dateSource,
+            coordinate: coordinate,
+            locationName: locationName,
+            mediaType: mediaType,
+            thumbnailPath: thumbnailPath,
+            albumNames: Self.combiningAlbums(folder: Self.folderAlbumName(relativePath: relativePath),
+                                             stored: stored)
         )
     }
 }

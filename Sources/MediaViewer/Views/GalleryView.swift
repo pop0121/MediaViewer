@@ -43,7 +43,11 @@ struct GalleryView: View {
 
     @ViewBuilder
     private func galleryContent(rootURL: URL) -> some View {
-        VStack(spacing: 0) {
+        NavigationSplitView {
+            AlbumSidebarView(viewModel: viewModel)
+                .navigationSplitViewColumnWidth(min: 150, ideal: 200, max: 320)
+        } detail: {
+            VStack(spacing: 0) {
             toolbar(rootURL: rootURL)
 
             if let clusterLabel = viewModel.clusterLabel {
@@ -123,6 +127,7 @@ struct GalleryView: View {
                     .frame(maxWidth: .infinity, alignment: .trailing)
                     .padding(.horizontal, 12)
                     .padding(.bottom, 4)
+            }
             }
         }
     }

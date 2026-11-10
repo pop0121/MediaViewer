@@ -14,6 +14,9 @@ final class LibraryViewModel: ObservableObject {
     @Published private(set) var scrollTarget: TimeScrollTarget?
     @Published private(set) var clusterSelection: Set<String>?
     @Published private(set) var clusterLabel: String?
+    /// Sidebar album filter. nil = all media. Independent of grouping mode:
+    /// a selected album is still grouped by date/location in the grid.
+    @Published var selectedAlbum: String?
     @Published var lastMapRegion: MKCoordinateRegion?
     @Published var regionFilter: GeoBounds?
     @Published var gridDensity: Double = 1.0
@@ -94,6 +97,27 @@ final class LibraryViewModel: ObservableObject {
         }
     }
 
+    /// Sidebar content: album name -> loaded item count, most items first.
+    /// Derived from the loaded pages; the timeline hydration pass fills in
+    /// the tail shortly after a scan.
+    var albumSummaries: [(name: String, count: Int)] {
+        var counts: [String: Int] = [:]
+        for item in items {
+            for album in item.albumNames {
+                counts[album, default: 0] += 1
+            }
+        }
+        return counts
+            .map { (name: $0.key, count: $0.value) }
+            .sorted { $0.count != $1.count ? $0.count > $1.count : $0.name < $1.name }
+    }
+
+    /// Status text for the last vivo album import; shown in the sidebar.
+    @Published var vivoAlbumNotice: String?
+    /// True when the pcsuite database exists but the sandbox blocked the read;
+    /// the sidebar then offers a file-grant button.
+    @Published var vivoAlbumAccessDenied = false
+
     init() {
         collapsedGroupIDsByMode = loadCollapsedGroupIDs()
 
@@ -108,10 +132,15 @@ final class LibraryViewModel: ObservableObject {
 
         $items
             .combineLatest($groupingMode, $regionFilter, $clusterSelection)
-            .sink { [weak self] items, mode, regionFilter, clusterSelection in
+            .combineLatest($selectedAlbum)
+            .sink { [weak self] inputs, selectedAlbum in
                 guard let self else { return }
+                let (items, mode, regionFilter, clusterSelection) = inputs
                 self.regroupCount += 1
                 var scoped = items
+                if let selectedAlbum {
+                    scoped = scoped.filter { $0.albumNames.contains(selectedAlbum) }
+                }
                 if let clusterSelection {
                     scoped = scoped.filter { clusterSelection.contains($0.id) }
                 } else if let regionFilter {
@@ -152,6 +181,9 @@ final class LibraryViewModel: ObservableObject {
         groupedItems = []
         totalItemCount = 0
         selectedItem = nil
+        selectedAlbum = nil
+        vivoAlbumNotice = nil
+        vivoAlbumAccessDenied = false
         scanProgress = ""
         scanNotice = ""
         try? BookmarkStore.shared.saveBookmark(for: url)
@@ -338,7 +370,8 @@ final class LibraryViewModel: ObservableObject {
                 if existing.contentModificationDate != item.contentModificationDate
                     || existing.derivedDate != item.derivedDate
                     || existing.dateSource != item.dateSource
-                    || existing.locationName != item.locationName {
+                    || existing.locationName != item.locationName
+                    || existing.albumNames != item.albumNames {
                     updated[index] = item
                     dateKeyCache.removeValue(forKey: item.id)
                     changed = true
@@ -397,10 +430,60 @@ final class LibraryViewModel: ObservableObject {
         maintenanceTask?.cancel()
         maintenanceTask = Task { [weak self] in
             guard let self else { return }
+            await self.importVivoAlbumsIfAvailable()
+            guard !Task.isCancelled else { return }
             await self.purgeOrphanedThumbnails(rootURL: rootURL)
             guard !Task.isCancelled else { return }
             await self.geocodeLocations(rootURL: rootURL)
         }
+    }
+
+    /// Re-import album structure from vivo 办公套件 and refresh the loaded
+    /// items in place (no scroll jump, no full refetch). Idempotent.
+    func importVivoAlbums() async {
+        guard let persistence, let rootURL else { return }
+        let outcome: VivoAlbumImportOutcome
+        let storedByPath: [String: [String]]
+        (outcome, storedByPath) = await VivoAlbumImporter().importIfAvailable(
+            persistence: persistence,
+            rootURL: rootURL
+        )
+        vivoAlbumAccessDenied = false
+        switch outcome {
+        case .imported(let matched, let albumCount):
+            vivoAlbumNotice = albumCount == 0
+                ? "vivo 办公套件没有可用的相册记录"
+                : "已从 vivo 办公套件导入 \(albumCount) 个相册，匹配 \(matched) 个文件"
+        case .notFound:
+            vivoAlbumNotice = "未找到 vivo 办公套件传输记录（仅覆盖通过该套件传输的文件）"
+        case .accessDenied:
+            vivoAlbumNotice = "无法读取 vivo 办公套件数据，请在下方授权选择 TransferRecord.db"
+            vivoAlbumAccessDenied = true
+        case .failed(let message):
+            vivoAlbumNotice = "vivo 相册导入失败：\(message)"
+        }
+
+        guard !storedByPath.isEmpty else { return }
+        var updated = items
+        var changed = false
+        for index in updated.indices {
+            let path = updated[index].relativePath
+            guard let stored = storedByPath[path] else { continue }
+            let refreshed = updated[index].withImportedAlbumNames(stored)
+            if refreshed.albumNames != updated[index].albumNames {
+                updated[index] = refreshed
+                changed = true
+            }
+        }
+        if changed {
+            items = updated
+        }
+    }
+
+    private func importVivoAlbumsIfAvailable() async {
+        // Cheap no-op when pcsuite is not installed: the importer finds no
+        // database and returns without touching the index.
+        await importVivoAlbums()
     }
 
     private func purgeOrphanedThumbnails(rootURL: URL) async {

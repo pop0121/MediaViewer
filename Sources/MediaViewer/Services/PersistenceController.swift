@@ -107,10 +107,18 @@ final class PersistenceController {
         thumbnailPath.attributeType = .stringAttributeType
         thumbnailPath.isOptional = true
 
+        // JSON-encoded [String] of album names imported from vivo 办公套件
+        // (TransferRecord.db). Folder albums are derived from relativePath and
+        // are not stored here. Optional so lightweight migration applies.
+        let albumNamesRaw = NSAttributeDescription()
+        albumNamesRaw.name = "albumNamesRaw"
+        albumNamesRaw.attributeType = .stringAttributeType
+        albumNamesRaw.isOptional = true
+
         itemEntity.properties = [
             relativePath, fileName, fileSize, contentModificationDate,
             creationDate, derivedDate, dateSourceRaw, latitude, longitude, locationName,
-            mediaTypeRaw, thumbnailPath
+            mediaTypeRaw, thumbnailPath, albumNamesRaw
         ]
         itemEntity.uniquenessConstraints = [[relativePath]]
 

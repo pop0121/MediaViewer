@@ -17,6 +17,28 @@ final class MediaItemEntity: NSManagedObject {
     @NSManaged var locationName: String?
     @NSManaged var mediaTypeRaw: String
     @NSManaged var thumbnailPath: String?
+    /// JSON-encoded album names imported from vivo 办公套件; nil/empty = none.
+    @NSManaged var albumNamesRaw: String?
+
+    /// Stored (vivo-imported) album names, decoded. Folder albums are derived
+    /// from relativePath by the UI layer and never stored here.
+    var storedAlbumNames: [String] {
+        get {
+            guard let albumNamesRaw,
+                  let data = albumNamesRaw.data(using: .utf8),
+                  let names = try? JSONDecoder().decode([String].self, from: data) else {
+                return []
+            }
+            return names
+        }
+        set {
+            guard !newValue.isEmpty else {
+                albumNamesRaw = nil
+                return
+            }
+            albumNamesRaw = try? String(data: JSONEncoder().encode(newValue), encoding: .utf8)
+        }
+    }
 
     var dateSource: MediaDateSource? {
         get { dateSourceRaw.flatMap(MediaDateSource.init(rawValue:)) }
@@ -60,7 +82,9 @@ extension MediaItem {
             coordinate: entity.coordinate,
             locationName: entity.locationName,
             mediaType: entity.mediaType,
-            thumbnailPath: entity.thumbnailPath
+            thumbnailPath: entity.thumbnailPath,
+            albumNames: Self.combiningAlbums(folder: Self.folderAlbumName(relativePath: entity.relativePath),
+                                             stored: entity.storedAlbumNames)
         )
     }
 }
